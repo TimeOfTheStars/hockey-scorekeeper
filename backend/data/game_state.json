@@ -1,0 +1,23 @@
+{
+  "TournamentTitle": "ТВОЯ ИГРА",
+  "SeriesInfo": "",
+  "BrandingImage": "",
+  "TeamA": "ЛОКОМОТИВ",
+  "TeamAFull": "ARCTIC",
+  "TeamB": "ДИНАМО ПИТЕР",
+  "TeamBFull": "StrongTeam",
+  "penalty_a": "None",
+  "penalty_b": "",
+  "ScoreA": 4,
+  "ScoreB": 8,
+  "ShotsA": 8,
+  "ShotsB": 11,
+  "logo_a": "Локомотив.png",
+  "logo_b": "Динамо.png",
+  "Timer": "00:00",
+  "PowerPlayTimer": "01:55",
+  "PowerPlayActive": false,
+  "Period": 3,
+  "Running": false,
+  "Visible": true
+}
