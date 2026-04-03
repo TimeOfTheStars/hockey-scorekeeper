@@ -1,44 +1,31 @@
-# CI: сборка + Artifacts в Actions (скачивание — как zip-обёртка от GitHub).
-# Release: при push тега v* тот же билд прикрепляет .exe / .dmg / .deb / AppImage к GitHub Release.
-#
-# Как выпустить версию: выровнять version в apps/desktop-host/src-tauri/tauri.conf.json (и при необходимости
-# Cargo.toml), затем: git tag v0.1.0 && git push origin v0.1.0
+# Сборка на трёх ОС + job publish: прикрепляет .exe / .msi / .dmg / .deb / AppImage к GitHub Release.
+# Версия релиза берётся из apps/desktop-host/package.json — держи её в ногу с src-tauri/tauri.conf.json и Cargo.toml.
+# main → релиз v{version}; dev → prerelease v{version}-dev
 
-name: Tauri build
+name: Desktop release
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
-    tags:
-      - "v*"
-    paths:
-      - "apps/desktop-host/**"
-      - "apps/obs-overlay/**"
-      - "packages/shared/**"
-      - ".github/workflows/tauri-build.yml"
-
-concurrency:
-  group: tauri-build-${{ github.ref }}
-  cancel-in-progress: true
+      - dev
 
 permissions:
-  # write нужен только для загрузки файлов в Release при теге v*; на обычных push в main токен не публикует релизы.
   contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-          - os: ubuntu-22.04
-          - os: macos-latest
-
+        os: [windows-latest, macos-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -53,8 +40,16 @@ jobs:
             apps/desktop-host/package-lock.json
             apps/obs-overlay/package-lock.json
 
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop-host/src-tauri
+
       - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -69,14 +64,6 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: apps/desktop-host/src-tauri
-
       - name: Install npm dependencies (obs-overlay)
         run: npm ci
         working-directory: apps/obs-overlay
@@ -85,30 +72,114 @@ jobs:
         run: npm ci
         working-directory: apps/desktop-host
 
-      # Без тега: только билд и артефакт в Actions.
-      - name: Tauri build (CI)
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+      - name: Build Tauri
         run: npx tauri build
         working-directory: apps/desktop-host
-
-      # С тегом v*: билд и прикрепление установщиков к GitHub Release (не только zip исходников).
-      - name: Tauri build & publish release assets
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: apps/desktop-host
-          tagName: ${{ github.ref_name }}
-          releaseName: "Hockey Desktop Host ${{ github.ref_name }}"
-          releaseBody: "Установщики для Windows (NSIS / MSI), Linux (deb / AppImage), macOS (DMG / .app)."
-          releaseDraft: false
-          prerelease: false
+          CI: true
 
-      - name: Upload bundle (CI only)
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+      - name: Upload Windows installers
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: hockey-desktop-host-${{ matrix.os }}
-          path: apps/desktop-host/src-tauri/target/release/bundle/
+          name: tauri-windows
+          path: |
+            apps/desktop-host/src-tauri/target/release/bundle/**/*.exe
+            apps/desktop-host/src-tauri/target/release/bundle/**/*.msi
           if-no-files-found: error
+
+      - name: Upload macOS DMG
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-macos
+          path: apps/desktop-host/src-tauri/target/release/bundle/**/*.dmg
+          if-no-files-found: error
+
+      - name: Upload Linux packages
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-linux
+          path: |
+            apps/desktop-host/src-tauri/target/release/bundle/**/*.deb
+            apps/desktop-host/src-tauri/target/release/bundle/**/*.AppImage
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          pattern: tauri-*
+          merge-multiple: true
+
+      - name: List files
+        run: find release -type f
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          REPO="${{ github.repository }}"
+
+          VERSION=$(node -p "require('./apps/desktop-host/package.json').version")
+          if [ "$REF_NAME" = "dev" ]; then
+            TITLE="${VERSION}-dev"
+            TAG="v${VERSION}-dev"
+            VER_LABEL="${VERSION}-dev"
+            PRERELEASE=(--prerelease)
+          else
+            TITLE="${VERSION}"
+            TAG="v${VERSION}"
+            VER_LABEL="${VERSION}"
+            PRERELEASE=()
+          fi
+
+          gh release delete "$TAG" --repo "$REPO" --yes 2>/dev/null || true
+          gh api --method DELETE -H "Accept: application/vnd.github+json" \
+            "/repos/$REPO/git/refs/tags/$TAG" 2>/dev/null || true
+
+          mapfile -t FILES_RAW < <(find release -type f \( \
+            -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' \
+          \) | sort)
+          if [ ${#FILES_RAW[@]} -eq 0 ]; then
+            echo "No installer files (.dmg/.exe/.msi/.deb/.AppImage) under release/"; exit 1
+          fi
+
+          mkdir -p release-upload
+          for f in "${FILES_RAW[@]}"; do
+            case "${f,,}" in
+              *.dmg) out="HockeyDesktopHostMacOS${VER_LABEL}.dmg" ;;
+              *.exe) out="HockeyDesktopHostWindows${VER_LABEL}.exe" ;;
+              *.msi) out="HockeyDesktopHostWindows${VER_LABEL}.msi" ;;
+              *.deb) out="HockeyDesktopHostLinux${VER_LABEL}.deb" ;;
+              *.appimage) out="HockeyDesktopHostLinux${VER_LABEL}.AppImage" ;;
+              *) out="HockeyDesktopHost_${VER_LABEL}_$(basename "$f")" ;;
+            esac
+            cp "$f" "release-upload/$out"
+          done
+          mapfile -t FILES < <(find release-upload -maxdepth 1 -type f | sort)
+
+          NOTES="Сборки для Windows, Linux и macOS. Версия: ${VER_LABEL}."
+
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --target "${{ github.sha }}" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            "${PRERELEASE[@]}" \
+            "${FILES[@]}"
