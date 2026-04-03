@@ -1,5 +1,8 @@
-# Сборка установщиков Tauri на Windows, Linux (deb/AppImage) и macOS (.app/.dmg).
-# Артефакты: Actions → запуск workflow → Artifacts (по одному на каждую ОС).
+# CI: сборка + Artifacts в Actions (скачивание — как zip-обёртка от GitHub).
+# Release: при push тега v* тот же билд прикрепляет .exe / .dmg / .deb / AppImage к GitHub Release.
+#
+# Как выпустить версию: выровнять version в apps/desktop-host/src-tauri/tauri.conf.json (и при необходимости
+# Cargo.toml), затем: git tag v0.1.0 && git push origin v0.1.0
 
 name: Tauri build
 
@@ -8,6 +11,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
     paths:
       - "apps/desktop-host/**"
       - "apps/obs-overlay/**"
@@ -19,7 +24,8 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  # write нужен только для загрузки файлов в Release при теге v*; на обычных push в main токен не публикует релизы.
+  contents: write
 
 jobs:
   build:
@@ -79,11 +85,28 @@ jobs:
         run: npm ci
         working-directory: apps/desktop-host
 
-      - name: Tauri build
+      # Без тега: только билд и артефакт в Actions.
+      - name: Tauri build (CI)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: npx tauri build
         working-directory: apps/desktop-host
 
-      - name: Upload bundle
+      # С тегом v*: билд и прикрепление установщиков к GitHub Release (не только zip исходников).
+      - name: Tauri build & publish release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop-host
+          tagName: ${{ github.ref_name }}
+          releaseName: "Hockey Desktop Host ${{ github.ref_name }}"
+          releaseBody: "Установщики для Windows (NSIS / MSI), Linux (deb / AppImage), macOS (DMG / .app)."
+          releaseDraft: false
+          prerelease: false
+
+      - name: Upload bundle (CI only)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: hockey-desktop-host-${{ matrix.os }}
