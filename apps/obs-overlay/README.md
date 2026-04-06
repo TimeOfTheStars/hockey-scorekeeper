@@ -1,12 +1,14 @@
-# OBS Overlay (web)
+# OBS Overlay
 
-Собирается Vite-ом в `apps/obs-overlay/dist`.
+Веб-оверлей (Vite + React): собирается в `dist/`, встраивается в desktop-host и раздаётся локальным gateway.
 
-Оверлей должен:
-- брать состояние только с локального сервера: `GET /api/state` и `ws://<localhost>/ws`;
-- использовать общие типы `GameState` из `packages/shared/types`.
+- Состояние: same-origin **`GET /api/state`** и **`WebSocket /ws`** (см. `src/shared/realtimeClient.ts`).
+- Типы: [`packages/shared/types/gameState.ts`](../../packages/shared/types/gameState.ts).
 
-`apps/desktop-host` (Tauri) в дальнейшем будет:
-- встраивать/раздавать `apps/obs-overlay/dist`;
-- поднимать websocket `/ws` и `GET /api/state`.
+```bash
+npm ci
+npm run dev    # разработка
+npm run build  # → dist/
+```
 
+**Полная документация:** [../../docs/README.md](../../docs/README.md).
