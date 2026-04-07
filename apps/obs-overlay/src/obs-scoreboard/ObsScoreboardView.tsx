@@ -1,5 +1,19 @@
 import type { GameState } from "../../../../packages/shared/types/gameState";
 
+/** Палитра как на референсе (broadcast scorebug). */
+const C = {
+  lightGray: "#D1D1D1",
+  mediumGray: "#707070",
+  dark: "#1A1A1A",
+  red: "#E11B22",
+  white: "#FFFFFF",
+  black: "#000000",
+  line: "#0D0D0D",
+} as const;
+
+const GRID_COLS = "minmax(7rem, 9.5rem) 4.75rem 6.5rem";
+const ROW_H = "3.25rem";
+
 function periodLabel(period: number): string {
   if (period === 1) return "1ST";
   if (period === 2) return "2ND";
@@ -9,14 +23,12 @@ function periodLabel(period: number): string {
 
 function logoUrl(fileName: string) {
   const base = import.meta.env.VITE_BASE_LOGO_URL as string | undefined;
-  // Если база не задана (например, локальный server отдаёт `/logos/*`), используем относительный путь.
   if (!base || base.trim() === "") {
     return `/logos/${fileName}`;
   }
   return `${base}/logos/${fileName}`;
 }
 
-/** Имя файла в /logos/ или уже полный http(s) URL (как у vmix API). */
 function resolveLogoSrc(ref: string): string {
   const t = ref.trim();
   if (/^https?:\/\//i.test(t)) {
@@ -30,10 +42,9 @@ function isPenaltyEmpty(s: string): boolean {
   return t === "" || t.toLowerCase() === "none";
 }
 
-/** Нижний красный тикер: при большинстве — таймер PP, иначе penalty_a / penalty_b. «None» и пусто — не показываем. */
 function bottomTickerText(state: GameState): string {
   if (state.PowerPlayActive) {
-    return `БОЛЬШИНСТВО ${state.PowerPlayTimer}`;
+    return "";
   }
   if (!isPenaltyEmpty(state.penalty_a)) {
     return state.penalty_a;
@@ -56,56 +67,139 @@ export function ObsScoreboardView({ state, variant = "full" }: { state: GameStat
   }
 
   const tickerText = bottomTickerText(state);
+  const ppLabel = state.PowerPlayActive ? `PP ${state.PowerPlayTimer}` : "";
 
-  const section = (
-    <section className="w-[1040px] overflow-hidden border border-zinc-900/80 bg-zinc-950/90 text-white shadow-2xl">
-      <div className="flex min-h-[52px] items-center justify-between bg-gradient-to-r from-[#0a5db2] to-[#0d7ce6] px-5 py-2 font-black uppercase tracking-wide">
-        <span className="max-w-[55%] text-left text-[18px] leading-tight">{state.TournamentTitle}</span>
-        <span className="max-w-[42%] text-right text-[18px] leading-tight">{state.SeriesInfo}</span>
-      </div>
-
-      <div className="flex h-[152px]">
-        <div className="flex w-[218px] items-center justify-center gap-3 bg-gradient-to-b from-[#07101e] to-[#0a0f1a] px-2">
-          {state.BrandingImage.trim() ? (
-            <img
-              src={resolveLogoSrc(state.BrandingImage.trim())}
-              alt=""
-              className="max-h-[132px] w-full max-w-[200px] object-contain object-center"
-            />
-          ) : (
-            <div className="max-w-[200px] px-1 text-center leading-none">
-              <span className="text-[22px] font-black tracking-wide text-white">Time of the stars</span>
-            </div>
-          )}
+  const scorebug = (
+    <section
+      className="inline-block overflow-hidden rounded-none border-2 border-black shadow-none"
+      style={{ fontFamily: '"Roboto Condensed", "Arial Narrow", Impact, system-ui, sans-serif' }}
+    >
+      <div
+        className="grid"
+        style={{
+          gridTemplateColumns: GRID_COLS,
+          gridTemplateRows: `${ROW_H} ${ROW_H}`,
+        }}
+      >
+        {/* ——— Ряд A: команда ——— */}
+        <div
+          className="flex min-h-[3.25rem] items-stretch border-b"
+          style={{ backgroundColor: C.lightGray, borderColor: C.line, gridColumn: 1, gridRow: 1 }}
+        >
+          <div className="w-1 shrink-0 self-stretch" style={{ backgroundColor: C.red }} aria-hidden />
+          <div className="flex min-w-0 flex-1 items-center px-2">
+            {state.logo_a.trim() ? (
+              <img
+                src={resolveLogoSrc(state.logo_a.trim())}
+                alt=""
+                className="mr-2 h-7 w-7 shrink-0 object-contain"
+              />
+            ) : null}
+            <span
+              className="truncate text-xl font-bold uppercase leading-none tracking-tight"
+              style={{ color: C.black }}
+            >
+              {state.TeamA}
+            </span>
+          </div>
         </div>
 
-        <div className="flex flex-1">
-          <div className="flex-1">
-            <div className="flex h-1/2 items-center border-y border-zinc-900 bg-[linear-gradient(90deg,#0f3767_0%,#0f3767_58%,#14294a_100%)] px-4">
-              <img src={resolveLogoSrc(state.logo_a)} alt={state.TeamA} className="mr-3 h-12 w-12 object-contain" />
-              <span className="text-[58px] font-black uppercase leading-none">{state.TeamA}</span>
-              <span className="ml-auto text-[68px] font-black leading-none">{state.ScoreA}</span>
-            </div>
-            <div className="flex h-1/2 items-center border-b border-zinc-900 bg-[linear-gradient(90deg,#8e1f33_0%,#8e1f33_58%,#681828_100%)] px-4">
-              <img src={resolveLogoSrc(state.logo_b)} alt={state.TeamB} className="mr-3 h-12 w-12 object-contain" />
-              <span className="text-[58px] font-black uppercase leading-none">{state.TeamB}</span>
-              <span className="ml-auto text-[68px] font-black leading-none">{state.ScoreB}</span>
-            </div>
-          </div>
+        {/* Счёт A */}
+        <div
+          className="flex items-center justify-center border-b border-l"
+          style={{ backgroundColor: C.dark, borderColor: C.line, gridColumn: 2, gridRow: 1 }}
+        >
+          <span className="text-[2.75rem] font-black leading-none tabular-nums" style={{ color: C.white }}>
+            {state.ScoreA}
+          </span>
+        </div>
 
-          <div className="flex w-[200px] shrink-0 flex-col border-l border-zinc-900 bg-black">
-            <div className="flex flex-1 items-center justify-center border-b border-zinc-900 pt-1">
-              <div className="text-[56px] font-black leading-none">{periodLabel(state.Period)}</div>
-            </div>
-            <div className="flex flex-1 items-center justify-center py-1">
-              <div className="text-[64px] font-black leading-none tracking-tight">{state.Timer}</div>
-            </div>
+        {/* PP */}
+        <div
+          className="flex items-center justify-center border-b border-l px-1"
+          style={{
+            backgroundColor: state.PowerPlayActive ? C.red : C.dark,
+            borderColor: C.line,
+            color: C.white,
+            gridColumn: 3,
+            gridRow: 1,
+          }}
+        >
+          {ppLabel ? (
+            <span className="text-center text-base font-black uppercase leading-tight tracking-wide">{ppLabel}</span>
+          ) : null}
+        </div>
+
+        {/* ——— Ряд B: команда ——— */}
+        <div
+          className="flex min-h-[3.25rem] items-stretch"
+          style={{ backgroundColor: C.lightGray, gridColumn: 1, gridRow: 2 }}
+        >
+          <div className="flex w-1 shrink-0 self-stretch overflow-hidden" aria-hidden>
+            <div className="h-full w-1/2 shrink-0" style={{ backgroundColor: C.white }} />
+            <div className="h-full w-1/2 shrink-0" style={{ backgroundColor: C.mediumGray }} />
           </div>
+          <div className="flex min-w-0 flex-1 items-center px-2">
+            {state.logo_b.trim() ? (
+              <img
+                src={resolveLogoSrc(state.logo_b.trim())}
+                alt=""
+                className="mr-2 h-7 w-7 shrink-0 object-contain"
+              />
+            ) : null}
+            <span
+              className="truncate text-xl font-bold uppercase leading-none tracking-tight"
+              style={{ color: C.black }}
+            >
+              {state.TeamB}
+            </span>
+          </div>
+        </div>
+
+        <div
+          className="flex items-center justify-center border-l"
+          style={{ backgroundColor: C.dark, borderColor: C.line, gridColumn: 2, gridRow: 2 }}
+        >
+          <span className="text-[2.75rem] font-black leading-none tabular-nums" style={{ color: C.white }}>
+            {state.ScoreB}
+          </span>
+        </div>
+
+        <div style={{ backgroundColor: C.dark, gridColumn: 3, gridRow: 2 }} aria-hidden />
+      </div>
+
+      {/* Низ: часы (ширина команд) | период (счёт + PP) */}
+      <div
+        className="grid border-t-2"
+        style={{
+          gridTemplateColumns: GRID_COLS,
+          gridTemplateRows: ROW_H,
+          borderColor: C.line,
+        }}
+      >
+        <div
+          className="col-span-1 flex items-center justify-center border-r"
+          style={{ backgroundColor: C.dark, borderColor: C.line }}
+        >
+          <span className="text-[2.25rem] font-black tabular-nums tracking-tight" style={{ color: C.white }}>
+            {state.Timer}
+          </span>
+        </div>
+        <div
+          className="col-span-2 flex items-center justify-center"
+          style={{ backgroundColor: C.mediumGray }}
+        >
+          <span className="text-2xl font-black tracking-wide" style={{ color: C.white }}>
+            {periodLabel(state.Period)}
+          </span>
         </div>
       </div>
 
       {tickerText ? (
-        <div className="flex min-h-12 items-center bg-[linear-gradient(90deg,#8d1f33_0%,#b02f49_50%,#8d1f33_100%)] px-4 text-[36px] font-black uppercase leading-none">
+        <div
+          className="flex min-h-10 items-center justify-center border-t-2 px-3 py-1 text-center text-sm font-bold uppercase leading-tight"
+          style={{ backgroundColor: C.red, borderColor: C.line, color: C.white }}
+        >
           {tickerText}
         </div>
       ) : null}
@@ -114,12 +208,13 @@ export function ObsScoreboardView({ state, variant = "full" }: { state: GameStat
 
   if (variant === "preview") {
     return (
-      <div className="relative h-[280px] w-full overflow-hidden rounded border border-zinc-800 bg-zinc-950">
-        <div className="pointer-events-none absolute left-0 top-0 origin-top-left scale-[0.42]">{section}</div>
+      <div className="relative flex h-[200px] w-full items-center justify-center overflow-hidden rounded border border-zinc-800 bg-zinc-950">
+        <div className="pointer-events-none origin-center scale-[0.72]">{scorebug}</div>
       </div>
     );
   }
 
-  return <main className="flex h-screen w-screen items-start justify-start bg-transparent p-4">{section}</main>;
+  return (
+    <main className="flex min-h-screen w-screen items-start justify-start bg-transparent p-4">{scorebug}</main>
+  );
 }
-
