@@ -1,9 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { GameState } from "../../../packages/shared/types/gameState";
 import { defaultGameState } from "../../../packages/shared/types/gameState";
 import { ObsScoreboardView } from "../../obs-overlay/src/obs-scoreboard/ObsScoreboardView";
-import { parseExternalStatePayload } from "./shared/parseExternalState";
+import { parseExternalStatePayload, type IceFieldId } from "./shared/parseExternalState";
 
 type ValidateState = "idle" | "validating" | "ready" | "error";
 
@@ -18,6 +18,18 @@ export default function App() {
   const [preview, setPreview] = useState<GameState>(defaultGameState);
   const [obsUrl, setObsUrl] = useState<string | null>(null);
   const [serverRunning, setServerRunning] = useState(false);
+  const [iceField, setIceField] = useState<IceFieldId>("A");
+  const [lastValidatedJson, setLastValidatedJson] = useState<unknown>(null);
+
+  useEffect(() => {
+    if (lastValidatedJson == null) {
+      return;
+    }
+    const parsed = parseExternalStatePayload(lastValidatedJson, iceField);
+    if (parsed) {
+      setPreview(parsed);
+    }
+  }, [iceField, lastValidatedJson]);
 
   const statusLabel = useMemo(() => {
     if (validateState === "idle") return "Ожидание";
@@ -44,14 +56,16 @@ export default function App() {
       }
 
       const json = (await response.json()) as unknown;
-      const parsed = parseExternalStatePayload(json);
+      const parsed = parseExternalStatePayload(json, iceField);
       if (!parsed) {
         throw new Error("Не удалось распарсить GameState из ответа.");
       }
 
+      setLastValidatedJson(json);
       setPreview(parsed);
       setValidateState("ready");
     } catch (e) {
+      setLastValidatedJson(null);
       setValidateState("error");
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -67,6 +81,7 @@ export default function App() {
         apiUrl: apiUrl.trim(),
         port: localPort,
         testMode: false,
+        iceField,
       });
       setObsUrl(url);
       setServerRunning(true);
@@ -85,12 +100,27 @@ export default function App() {
         apiUrl: "",
         port: DEFAULT_GATEWAY_PORT,
         testMode: true,
+        iceField: "A",
       });
       setLocalPort(DEFAULT_GATEWAY_PORT);
       setObsUrl(url);
       setServerRunning(true);
       setPreview(defaultGameState);
+      setLastValidatedJson(null);
       setValidateState("idle");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onIceFieldChange = async (next: IceFieldId) => {
+    setIceField(next);
+    if (!serverRunning) {
+      return;
+    }
+    setError("");
+    try {
+      await invoke("set_scoreboard_field", { field: next });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -126,6 +156,30 @@ export default function App() {
                 disabled={serverRunning}
               />
             </label>
+
+            <div className="block text-sm text-zinc-300">
+              <span className="mb-2 block">Поле льда (какую пару команд показать)</span>
+              <div className="flex flex-wrap gap-4">
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="radio"
+                    name="iceField"
+                    checked={iceField === "A"}
+                    onChange={() => void onIceFieldChange("A")}
+                  />
+                  <span>Поле A (HA / GA)</span>
+                </label>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="radio"
+                    name="iceField"
+                    checked={iceField === "B"}
+                    onChange={() => void onIceFieldChange("B")}
+                  />
+                  <span>Поле B (HB / GB)</span>
+                </label>
+              </div>
+            </div>
 
             <label className="block text-sm text-zinc-300">
               <span className="mb-1 block">Локальный порт для OBS (gateway)</span>

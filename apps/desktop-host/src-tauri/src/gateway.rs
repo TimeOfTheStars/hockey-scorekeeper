@@ -18,8 +18,42 @@ use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
 use tower_http::services::{ServeDir, ServeFile};
 
-/// Состояние по умолчанию совпадает с `packages/shared/types/gameState.ts` (shallow merge с ответом API).
-fn default_state_value() -> Value {
+/// Дефолты для **новой** схемы API (HA/GA/HB/GB) при merge с ответом.
+fn new_schema_defaults() -> Value {
+    serde_json::json!({
+        "TournamentTitle": "Регулярный турнир по хоккею с шайбой",
+        "TeamHA": "A",
+        "TeamHAFull": "Team A",
+        "TeamGA": "B",
+        "TeamGAFull": "Team B",
+        "TeamHB": "A",
+        "TeamHBFull": "Team A",
+        "TeamGB": "B",
+        "TeamGBFull": "Team B",
+        "PenaltyH": "None",
+        "PenaltyG": "None",
+        "ScoreHA": 0,
+        "ScoreGA": 0,
+        "ScoreHB": 0,
+        "ScoreGB": 0,
+        "ShotsH": 0,
+        "ShotsG": 0,
+        "LogoHA": "team-a.png",
+        "LogoGA": "team-b.png",
+        "LogoHB": "team-a.png",
+        "LogoGB": "team-b.png",
+        "logoLeagues": "",
+        "Timer": "20:00",
+        "Period": 1,
+        "Running": false,
+        "Visible": true,
+        "PowerPlayTimer": "02:00",
+        "PowerPlayActive": false
+    })
+}
+
+/// Дефолты **оверлея** (ключи GameState) для старого API без HA/HB.
+fn default_overlay_value() -> Value {
     serde_json::json!({
         "TournamentTitle": "Регулярный турнир по хоккею с шайбой",
         "SeriesInfo": "",
@@ -46,10 +80,7 @@ fn default_state_value() -> Value {
 }
 
 fn shallow_merge(base: Value, patch: &Value) -> Value {
-    let mut b = base
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let mut b = base.as_object().cloned().unwrap_or_default();
     if let Some(p) = patch.as_object() {
         for (k, v) in p {
             b.insert(k.clone(), v.clone());
@@ -58,13 +89,220 @@ fn shallow_merge(base: Value, patch: &Value) -> Value {
     Value::Object(b)
 }
 
-pub fn merge_external_payload(raw: Value) -> Value {
-    let patch = if raw.is_array() {
+fn extract_patch(raw: Value) -> Value {
+    if raw.is_array() {
         raw.get(0).cloned().unwrap_or(Value::Null)
     } else {
         raw
+    }
+}
+
+/// Только по **сырому** фрагменту ответа (до merge с дефолтами), иначе HA-ключи из дефолтов ломают legacy.
+fn is_new_schema_patch(patch: &Value) -> bool {
+    patch
+        .as_object()
+        .map(|o| {
+            o.contains_key("TeamHA")
+                || o.contains_key("TeamHB")
+                || o.contains_key("ScoreHA")
+                || o.contains_key("ScoreHB")
+        })
+        .unwrap_or(false)
+}
+
+fn merge_incoming(raw: Value) -> (Value, bool) {
+    let patch = extract_patch(raw);
+    let new_schema = is_new_schema_patch(&patch);
+    let merged = if new_schema {
+        shallow_merge(new_schema_defaults(), &patch)
+    } else {
+        shallow_merge(default_overlay_value(), &patch)
     };
-    shallow_merge(default_state_value(), &patch)
+    (merged, new_schema)
+}
+
+fn as_str(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn as_i64(v: Option<&Value>) -> i64 {
+    v.and_then(|x| x.as_i64())
+        .or_else(|| v.and_then(|x| x.as_f64()).map(|f| f as i64))
+        .unwrap_or(0)
+}
+
+fn as_bool(v: Option<&Value>, default: bool) -> bool {
+    v.and_then(|x| x.as_bool()).unwrap_or(default)
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum ActiveField {
+    #[default]
+    A,
+    B,
+}
+
+impl ActiveField {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "A" => Some(ActiveField::A),
+            "B" => Some(ActiveField::B),
+            _ => None,
+        }
+    }
+}
+
+/// Снимок для OBS/WebSocket: ключи как в `GameState`.
+pub fn build_client_state(source: &Value, field: ActiveField, use_new_schema: bool) -> Value {
+    if !use_new_schema {
+        return shallow_merge(default_overlay_value(), source);
+    }
+
+    let Some(obj) = source.as_object() else {
+        return default_overlay_value();
+    };
+
+    let title_raw = as_str(obj.get("TournamentTitle"));
+    let def_title = default_overlay_value()["TournamentTitle"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let tournament = if title_raw.is_empty() {
+        def_title
+    } else {
+        title_raw
+    };
+    let timer = as_str(obj.get("Timer"));
+    let period = as_i64(obj.get("Period")).max(1) as i64;
+    let running = as_bool(obj.get("Running"), false);
+    let visible = as_bool(obj.get("Visible"), true);
+    let pp_timer = as_str(obj.get("PowerPlayTimer"));
+    let pp_active = as_bool(obj.get("PowerPlayActive"), false);
+    let league_logo = as_str(obj.get("logoLeagues"));
+
+    let (team_a, team_af, team_b, team_bf, pa, pb, sa, sb, sha, shb, la, lb): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+    ) = match field {
+        ActiveField::A => (
+            as_str(obj.get("TeamHA")),
+            as_str(obj.get("TeamHAFull")),
+            as_str(obj.get("TeamGA")),
+            as_str(obj.get("TeamGAFull")),
+            as_str(obj.get("PenaltyH")),
+            as_str(obj.get("PenaltyG")),
+            as_i64(obj.get("ScoreHA")),
+            as_i64(obj.get("ScoreGA")),
+            as_i64(obj.get("ShotsH")),
+            as_i64(obj.get("ShotsG")),
+            as_str(obj.get("LogoHA")),
+            as_str(obj.get("LogoGA")),
+        ),
+        ActiveField::B => (
+            as_str(obj.get("TeamHB")),
+            as_str(obj.get("TeamHBFull")),
+            as_str(obj.get("TeamGB")),
+            as_str(obj.get("TeamGBFull")),
+            as_str(obj.get("PenaltyH")),
+            as_str(obj.get("PenaltyG")),
+            as_i64(obj.get("ScoreHB")),
+            as_i64(obj.get("ScoreGB")),
+            as_i64(obj.get("ShotsH")),
+            as_i64(obj.get("ShotsG")),
+            as_str(obj.get("LogoHB")),
+            as_str(obj.get("LogoGB")),
+        ),
+    };
+
+    let team_a_o = if team_a.is_empty() {
+        "A".to_string()
+    } else {
+        team_a
+    };
+    let team_af_o = if team_af.is_empty() {
+        "Team A".to_string()
+    } else {
+        team_af
+    };
+    let team_b_o = if team_b.is_empty() {
+        "B".to_string()
+    } else {
+        team_b
+    };
+    let team_bf_o = if team_bf.is_empty() {
+        "Team B".to_string()
+    } else {
+        team_bf
+    };
+    let pa_o = if pa.is_empty() {
+        "None".to_string()
+    } else {
+        pa
+    };
+    let pb_o = if pb.is_empty() {
+        "None".to_string()
+    } else {
+        pb
+    };
+    let la_o = if la.is_empty() {
+        "team-a.png".to_string()
+    } else {
+        la
+    };
+    let lb_o = if lb.is_empty() {
+        "team-b.png".to_string()
+    } else {
+        lb
+    };
+    let timer_o = if timer.is_empty() {
+        "20:00".to_string()
+    } else {
+        timer
+    };
+    let pp_timer_o = if pp_timer.is_empty() {
+        "02:00".to_string()
+    } else {
+        pp_timer
+    };
+
+    serde_json::json!({
+        "TournamentTitle": tournament,
+        "SeriesInfo": "",
+        "BrandingImage": league_logo,
+        "TeamA": team_a_o,
+        "TeamAFull": team_af_o,
+        "TeamB": team_b_o,
+        "TeamBFull": team_bf_o,
+        "penalty_a": pa_o,
+        "penalty_b": pb_o,
+        "ScoreA": sa,
+        "ScoreB": sb,
+        "ShotsA": sha,
+        "ShotsB": shb,
+        "logo_a": la_o,
+        "logo_b": lb_o,
+        "Timer": timer_o,
+        "PowerPlayTimer": pp_timer_o,
+        "PowerPlayActive": pp_active,
+        "Period": period,
+        "Running": running,
+        "Visible": visible,
+    })
 }
 
 fn overlay_dist_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -89,15 +327,32 @@ fn overlay_dist_path(app: &AppHandle) -> Result<PathBuf, String> {
     ))
 }
 
+pub struct GatewaySync {
+    pub source: Value,
+    pub field: ActiveField,
+    pub use_new_schema: bool,
+}
+
+pub struct RuntimeHandles {
+    pub sync: Arc<RwLock<GatewaySync>>,
+    pub tx: broadcast::Sender<String>,
+}
+
 #[derive(Clone)]
 struct GatewayInner {
-    state: Arc<RwLock<Value>>,
-    tx: broadcast::Sender<String>,
+    runtime: Arc<RuntimeHandles>,
+}
+
+async fn envelope_for_display_async(runtime: &RuntimeHandles) -> String {
+    let g = runtime.sync.read().await;
+    let display = build_client_state(&g.source, g.field, g.use_new_schema);
+    serde_json::json!({ "type": "state", "payload": display }).to_string()
 }
 
 async fn get_state_json(State(inner): State<GatewayInner>) -> Result<Json<Value>, StatusCode> {
-    let st = inner.state.read().await;
-    Ok(Json(st.clone()))
+    let g = inner.runtime.sync.read().await;
+    let display = build_client_state(&g.source, g.field, g.use_new_schema);
+    Ok(Json(display))
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(inner): State<GatewayInner>) -> impl IntoResponse {
@@ -105,8 +360,11 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(inner): State<GatewayInner>) -> 
 }
 
 async fn ws_connected(mut socket: WebSocket, inner: GatewayInner) {
-    let mut rx = inner.tx.subscribe();
-    let initial = inner.state.read().await.clone();
+    let mut rx = inner.runtime.tx.subscribe();
+    let initial = {
+        let g = inner.runtime.sync.read().await;
+        build_client_state(&g.source, g.field, g.use_new_schema)
+    };
     let envelope = serde_json::json!({ "type": "state", "payload": initial }).to_string();
     if socket.send(Message::Text(envelope.into())).await.is_err() {
         return;
@@ -129,7 +387,7 @@ async fn ws_connected(mut socket: WebSocket, inner: GatewayInner) {
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => { /* пропуск устаревших */ }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -150,8 +408,7 @@ fn router(inner: GatewayInner, dist: PathBuf) -> Router {
 
 async fn poll_loop(
     api_url: String,
-    state_holder: Arc<RwLock<Value>>,
-    tx: broadcast::Sender<String>,
+    runtime: Arc<RuntimeHandles>,
     cancel: CancellationToken,
 ) {
     let client = match reqwest::Client::builder()
@@ -169,13 +426,14 @@ async fn poll_loop(
                 match client.get(&api_url).send().await {
                     Ok(resp) if resp.status().is_success() => {
                         if let Ok(json) = resp.json::<Value>().await {
-                            let merged = merge_external_payload(json);
+                            let (merged, new_schema) = merge_incoming(json);
                             {
-                                let mut w = state_holder.write().await;
-                                *w = merged.clone();
+                                let mut w = runtime.sync.write().await;
+                                w.source = merged;
+                                w.use_new_schema = new_schema;
                             }
-                            let envelope = serde_json::json!({ "type": "state", "payload": merged }).to_string();
-                            let _ = tx.send(envelope);
+                            let msg = envelope_for_display_async(&runtime).await;
+                            let _ = runtime.tx.send(msg);
                         }
                     }
                     _ => {}
@@ -189,6 +447,7 @@ pub struct GatewayController {
     cancel: Option<CancellationToken>,
     server_task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     poller_task: Option<tokio::task::JoinHandle<()>>,
+    pub runtime: Option<Arc<RuntimeHandles>>,
 }
 
 impl GatewayController {
@@ -197,6 +456,7 @@ impl GatewayController {
             cancel: None,
             server_task: None,
             poller_task: None,
+            runtime: None,
         }
     }
 
@@ -211,6 +471,21 @@ impl GatewayController {
         if let Some(h) = self.poller_task.take() {
             h.await.map_err(|e| format!("poller join: {e}"))?;
         }
+        self.runtime = None;
+        Ok(())
+    }
+
+    pub async fn set_field(&mut self, field: ActiveField) -> Result<(), String> {
+        let rt = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| "Сервер не запущен".to_string())?;
+        {
+            let mut w = rt.sync.write().await;
+            w.field = field;
+        }
+        let msg = envelope_for_display_async(rt).await;
+        let _ = rt.tx.send(msg);
         Ok(())
     }
 
@@ -220,6 +495,7 @@ impl GatewayController {
         api_url: String,
         port: u16,
         test_mode: bool,
+        initial_field: ActiveField,
     ) -> Result<String, String> {
         if !test_mode {
             if !api_url.starts_with("http://") && !api_url.starts_with("https://") {
@@ -243,11 +519,19 @@ impl GatewayController {
             .local_addr()
             .map_err(|e| format!("local_addr: {e}"))?;
 
-        let state = Arc::new(RwLock::new(default_state_value()));
+        let sync = Arc::new(RwLock::new(GatewaySync {
+            source: new_schema_defaults(),
+            field: initial_field,
+            use_new_schema: true,
+        }));
         let (tx, _rx) = broadcast::channel::<String>(32);
-        let inner = GatewayInner {
-            state: state.clone(),
+        let runtime = Arc::new(RuntimeHandles {
+            sync: sync.clone(),
             tx: tx.clone(),
+        });
+
+        let inner = GatewayInner {
+            runtime: runtime.clone(),
         };
         let axum_app = router(inner, dist);
 
@@ -262,18 +546,21 @@ impl GatewayController {
         });
 
         let poller_task = if test_mode {
+            let msg = envelope_for_display_async(&runtime).await;
+            let _ = tx.send(msg);
             None
         } else {
             let poll_cancel = token.clone();
-            let api_for_poll = api_url;
+            let rt = runtime.clone();
             Some(tokio::spawn(async move {
-                poll_loop(api_for_poll, state, tx, poll_cancel).await;
+                poll_loop(api_url, rt, poll_cancel).await;
             }))
         };
 
         self.cancel = Some(token);
         self.server_task = Some(server_task);
         self.poller_task = poller_task;
+        self.runtime = Some(runtime);
 
         Ok(format!("http://127.0.0.1:{}/", bound.port()))
     }

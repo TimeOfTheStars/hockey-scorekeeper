@@ -1,3 +1,6 @@
+/* Более “спортивный” condensed-шрифт для табло */
+@import url("https://fonts.googleapis.com/css2?family=Teko:wght@500;600;700&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -11,7 +14,7 @@ body,
 }
 
 body {
-  font-family: "Roboto Condensed", Impact, "Arial Black", Arial, sans-serif;
+  font-family: "Teko", "Roboto Condensed", Impact, "Arial Black", Arial, sans-serif;
   background: transparent;
   color: white;
 }
