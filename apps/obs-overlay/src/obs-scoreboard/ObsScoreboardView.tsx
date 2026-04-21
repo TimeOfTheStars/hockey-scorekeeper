@@ -1,24 +1,29 @@
+import type { CSSProperties, ReactNode } from "react";
 import type { GameState } from "../../../../packages/shared/types/gameState";
 
-/** Палитра как на референсе (broadcast scorebug). */
+/** Палитра по референсу: верхняя полоса — градиент слева направо, низ — сплошной синий. */
 const C = {
-  lightGray: "#D1D1D1",
-  mediumGray: "#707070",
-  dark: "#1A1A1A",
-  red: "#E11B22",
+  blueBand1: "#4a70b5",
+  blueBand2: "#a8b8d0",
+  blueBandBottom: "#2b4a9a",
+  /** Акцент и рамки (вместо бывшего красного). */
+  accent: "#4a70b5",
+  dark: "#1a2f55",
+  darkScoreB: "#152542",
+  logoBg: "#3d4d68",
   white: "#FFFFFF",
-  black: "#000000",
-  line: "#0D0D0D",
+  black: "#0A0A0A",
 } as const;
 
-const GRID_COLS = "minmax(7rem, 9.5rem) 4.75rem 6.5rem";
-const ROW_H = "3.25rem";
+const SKEW_DEG = 14;
+const OUTLINE: CSSProperties = {
+  WebkitTextStroke: `1.5px ${C.black}`,
+  paintOrder: "stroke fill",
+};
 
-function periodLabel(period: number): string {
-  if (period === 1) return "1ST";
-  if (period === 2) return "2ND";
-  if (period === 3) return "3RD";
-  return `${period}TH`;
+function periodLabelRu(period: number): { num: string; rest: string } {
+  if (period <= 0) return { num: "—", rest: "ПЕР" };
+  return { num: String(period), rest: "ПЕР" };
 }
 
 function logoUrl(fileName: string) {
@@ -57,6 +62,42 @@ function bottomTickerText(state: GameState): string {
 
 type Variant = "full" | "preview";
 
+/** Внешняя ячейка со skew; фиксированная высота строки, рамки/padding не увеличивают блок (box-border). */
+function SkewPanel({
+  children,
+  className,
+  style,
+  innerClassName,
+}: {
+  children: ReactNode;
+  className?: string;
+  style?: CSSProperties;
+  innerClassName?: string;
+}) {
+  return (
+    <div
+      className={`box-border flex h-[52px] min-h-[52px] max-h-[52px] overflow-hidden ${className ?? ""}`}
+      style={{
+        transform: `skewX(-${SKEW_DEG}deg)`,
+        transformOrigin: "50% 50%",
+        ...style,
+      }}
+    >
+      <div
+        className={innerClassName}
+        style={{
+          transform: `skewX(${SKEW_DEG}deg)`,
+          height: "100%",
+          minHeight: 0,
+          width: "100%",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export function ObsScoreboardView({ state, variant = "full" }: { state: GameState; variant?: Variant }) {
   if (!state.Visible) {
     const emptyClass =
@@ -67,166 +108,198 @@ export function ObsScoreboardView({ state, variant = "full" }: { state: GameStat
   }
 
   const tickerText = bottomTickerText(state);
-  const ppLabel = state.PowerPlayActive ? `PP ${state.PowerPlayTimer}` : "";
+  const period = periodLabelRu(state.Period);
+  const tournamentTitle = state.TournamentTitle.trim();
+  const tournamentLogo = state.BrandingImage.trim();
+  const showTournamentBar = tournamentTitle.length > 0 || tournamentLogo.length > 0;
+  const font: CSSProperties = {
+    fontFamily: '"Montserrat", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif',
+  };
 
   const scorebug = (
     <section
-      className="inline-block overflow-hidden rounded-none border-2 border-black shadow-none"
-      style={{ fontFamily: '"Teko", "Roboto Condensed", "Arial Narrow", Impact, system-ui, sans-serif' }}
+      className="block w-full min-w-0 max-w-none"
+      style={{
+        ...font,
+        filter: "drop-shadow(3px 5px 10px rgba(0,0,0,0.55))",
+      }}
     >
-      {state.BrandingImage.trim() ? (
-        <div
-          className="flex h-8 items-center justify-end gap-2 border-b-2 px-2"
-          style={{ backgroundColor: C.dark, borderColor: C.line }}
-        >
-          <img
-            src={resolveLogoSrc(state.BrandingImage.trim())}
-            alt=""
-            className="max-h-7 w-auto max-w-[120px] object-contain object-right"
-          />
-        </div>
-      ) : null}
-      <div
-        className="grid"
-        style={{
-          gridTemplateColumns: GRID_COLS,
-          gridTemplateRows: `${ROW_H} ${ROW_H}`,
-        }}
-      >
-        {/* ——— Ряд A: команда ——— */}
-        <div
-          className="flex min-h-[3.25rem] items-stretch border-b"
-          style={{ backgroundColor: C.lightGray, borderColor: C.line, gridColumn: 1, gridRow: 1 }}
-        >
-          <div className="w-1 shrink-0 self-stretch" style={{ backgroundColor: C.red }} aria-hidden />
-          <div className="flex min-w-0 flex-1 items-center px-2">
+      <div className="flex w-full min-w-0 max-w-none flex-col gap-1">
+        {showTournamentBar ? (
+          <div
+            className={`flex min-h-[2.5rem] w-full items-center gap-2 border-2 border-solid border-black px-2 py-1.5 ${tournamentTitle ? "" : "justify-center"}`}
+            style={{
+              backgroundImage: `linear-gradient(to right, ${C.blueBand1}, ${C.blueBand2})`,
+            }}
+          >
+            {tournamentLogo ? (
+              <img
+                src={resolveLogoSrc(tournamentLogo)}
+                alt=""
+                className="h-7 w-auto max-w-[120px] shrink-0 object-contain"
+              />
+            ) : null}
+            {tournamentTitle ? (
+              <span
+                className={`min-w-0 truncate text-xs font-black uppercase leading-tight tracking-wide sm:text-sm ${tournamentLogo ? "flex-1 text-left" : "w-full text-center"}`}
+                style={{ color: C.white, ...OUTLINE }}
+              >
+                {tournamentTitle}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Верхняя команда */}
+        <div className="flex min-w-0 items-center">
+          <SkewPanel
+            className="z-10 -mr-1.5 w-[4.25rem] shrink-0 border-solid border-l-[4px] border-t-[4px] px-0.5"
+            style={{ backgroundColor: C.logoBg, borderLeftColor: C.accent, borderTopColor: C.accent }}
+            innerClassName="flex items-center justify-center"
+          >
             {state.logo_a.trim() ? (
               <img
                 src={resolveLogoSrc(state.logo_a.trim())}
                 alt=""
-                className="mr-2 h-7 w-7 shrink-0 object-contain"
+                className="h-10 w-10 max-h-[2.75rem] max-w-[2.75rem] object-contain"
               />
-            ) : null}
+            ) : (
+              <span className="text-xs font-black uppercase text-white/50">A</span>
+            )}
+          </SkewPanel>
+
+          <SkewPanel
+            className="z-[9] -mr-1.5 min-w-0 flex-[1_1_0%] basis-0 px-2 sm:px-3"
+            style={{ backgroundColor: C.dark }}
+            innerClassName="flex min-h-0 min-w-0 items-center"
+          >
             <span
-              className="truncate text-xl font-bold uppercase leading-none tracking-tight"
-              style={{ color: C.black }}
+              className="block min-w-0 w-full truncate text-2xl font-black uppercase leading-none tracking-tight sm:text-3xl"
+              style={{ color: C.white, ...OUTLINE }}
             >
               {state.TeamA}
             </span>
-          </div>
+          </SkewPanel>
+
+          <SkewPanel
+            className="z-[8] -mr-1.5 w-[4.25rem] shrink-0 border-2 border-solid border-black"
+            style={{
+              backgroundImage: `linear-gradient(to right, ${C.blueBand1}, ${C.blueBand2})`,
+            }}
+            innerClassName="flex items-center justify-center px-1"
+          >
+            <span className="text-3xl font-black tabular-nums leading-none sm:text-4xl" style={{ color: C.white, ...OUTLINE }}>
+              {state.ScoreA}
+            </span>
+          </SkewPanel>
+
+          <SkewPanel
+            className="z-[7] min-w-[6.5rem] shrink-0 border-2 border-solid border-black px-1 sm:min-w-[7.5rem] sm:px-2"
+            style={{
+              backgroundImage: `linear-gradient(to right, ${C.blueBand1}, ${C.blueBand2})`,
+            }}
+            innerClassName="flex items-center justify-center leading-none"
+          >
+            {state.PowerPlayActive ? (
+              <span className="whitespace-nowrap text-lg font-black tabular-nums tracking-tight" style={{ color: C.white, ...OUTLINE }}>
+                ББ {state.PowerPlayTimer}
+              </span>
+            ) : (
+              <div className="flex flex-row items-center justify-center gap-0.5">
+                <span className="text-xl font-black leading-none" style={{ color: C.white, ...OUTLINE }}>
+                  {period.num}
+                </span>
+                <span className="text-xl font-black uppercase leading-none" style={{ color: C.white, ...OUTLINE }}>
+                  {period.rest}
+                </span>
+              </div>
+            )}
+          </SkewPanel>
         </div>
 
-        {/* Счёт A */}
-        <div
-          className="flex items-center justify-center border-b border-l"
-          style={{ backgroundColor: C.dark, borderColor: C.line, gridColumn: 2, gridRow: 1 }}
-        >
-          <span className="text-[2.75rem] font-black leading-none tabular-nums" style={{ color: C.white }}>
-            {state.ScoreA}
-          </span>
-        </div>
-
-        {/* PP */}
-        <div
-          className="flex items-center justify-center border-b border-l px-1"
-          style={{
-            backgroundColor: state.PowerPlayActive ? C.red : C.dark,
-            borderColor: C.line,
-            color: C.white,
-            gridColumn: 3,
-            gridRow: 1,
-          }}
-        >
-          {ppLabel ? (
-            <span className="text-center text-base font-black uppercase leading-tight tracking-wide">{ppLabel}</span>
-          ) : null}
-        </div>
-
-        {/* ——— Ряд B: команда ——— */}
-        <div
-          className="flex min-h-[3.25rem] items-stretch"
-          style={{ backgroundColor: C.lightGray, gridColumn: 1, gridRow: 2 }}
-        >
-          <div className="flex w-1 shrink-0 self-stretch overflow-hidden" aria-hidden>
-            <div className="h-full w-1/2 shrink-0" style={{ backgroundColor: C.white }} />
-            <div className="h-full w-1/2 shrink-0" style={{ backgroundColor: C.mediumGray }} />
-          </div>
-          <div className="flex min-w-0 flex-1 items-center px-2">
+        {/* Нижняя команда */}
+        <div className="flex min-w-0 items-center">
+          <SkewPanel
+            className="z-10 -mr-1.5 w-[4.25rem] shrink-0 border-solid border-b-[4px] border-l-[4px] px-0.5"
+            style={{ backgroundColor: C.logoBg, borderLeftColor: C.accent, borderBottomColor: C.accent }}
+            innerClassName="flex items-center justify-center"
+          >
             {state.logo_b.trim() ? (
               <img
                 src={resolveLogoSrc(state.logo_b.trim())}
                 alt=""
-                className="mr-2 h-7 w-7 shrink-0 object-contain"
+                className="h-10 w-10 max-h-[2.75rem] max-w-[2.75rem] object-contain"
               />
-            ) : null}
+            ) : (
+              <span className="text-xs font-black uppercase text-white/50">B</span>
+            )}
+          </SkewPanel>
+
+          <SkewPanel
+            className="z-[9] -mr-1.5 min-w-0 flex-[1_1_0%] basis-0 px-2 sm:px-3"
+            style={{ backgroundColor: C.blueBandBottom }}
+            innerClassName="flex min-h-0 min-w-0 items-center"
+          >
             <span
-              className="truncate text-xl font-bold uppercase leading-none tracking-tight"
-              style={{ color: C.black }}
+              className="block min-w-0 w-full truncate text-2xl font-black uppercase leading-none tracking-tight sm:text-3xl"
+              style={{ color: C.white, ...OUTLINE }}
             >
               {state.TeamB}
             </span>
+          </SkewPanel>
+
+          <SkewPanel
+            className="z-[8] -mr-1.5 w-[4.25rem] shrink-0 border-2 border-solid border-black"
+            style={{ backgroundColor: C.darkScoreB }}
+            innerClassName="flex items-center justify-center px-1"
+          >
+            <span className="text-3xl font-black tabular-nums leading-none sm:text-4xl" style={{ color: C.white, ...OUTLINE }}>
+              {state.ScoreB}
+            </span>
+          </SkewPanel>
+
+          <SkewPanel
+            className="z-[7] min-w-[6.5rem] shrink-0 border-2 border-solid border-black px-1 sm:min-w-[7.5rem] sm:px-2"
+            style={{
+              backgroundImage: `linear-gradient(to right, ${C.blueBand1}, ${C.blueBand2})`,
+            }}
+            innerClassName="flex items-center justify-center leading-none"
+          >
+            {state.PowerPlayActive ? (
+              <span className="whitespace-nowrap text-lg font-black tabular-nums tracking-tight" style={{ color: C.white, ...OUTLINE }}>
+                {state.Timer} · {period.num} {period.rest}
+              </span>
+            ) : (
+              <span className="text-[1.4rem] font-black tabular-nums leading-none tracking-tight sm:text-[1.65rem]" style={{ color: C.white, ...OUTLINE }}>
+                {state.Timer}
+              </span>
+            )}
+          </SkewPanel>
+        </div>
+
+        {tickerText ? (
+          <div
+            className="flex min-h-9 items-center justify-center px-3 py-1 text-center text-xs font-black uppercase leading-tight tracking-wide"
+            style={{ backgroundColor: C.blueBandBottom, color: C.white, ...OUTLINE }}
+          >
+            {tickerText}
           </div>
-        </div>
-
-        <div
-          className="flex items-center justify-center border-l"
-          style={{ backgroundColor: C.dark, borderColor: C.line, gridColumn: 2, gridRow: 2 }}
-        >
-          <span className="text-[2.75rem] font-black leading-none tabular-nums" style={{ color: C.white }}>
-            {state.ScoreB}
-          </span>
-        </div>
-
-        <div style={{ backgroundColor: C.dark, gridColumn: 3, gridRow: 2 }} aria-hidden />
+        ) : null}
       </div>
-
-      {/* Низ: часы (ширина команд) | период (счёт + PP) */}
-      <div
-        className="grid border-t-2"
-        style={{
-          gridTemplateColumns: GRID_COLS,
-          gridTemplateRows: ROW_H,
-          borderColor: C.line,
-        }}
-      >
-        <div
-          className="col-span-1 flex items-center justify-center border-r"
-          style={{ backgroundColor: C.dark, borderColor: C.line }}
-        >
-          <span className="text-[2.25rem] font-black tabular-nums tracking-tight" style={{ color: C.white }}>
-            {state.Timer}
-          </span>
-        </div>
-        <div
-          className="col-span-2 flex items-center justify-center"
-          style={{ backgroundColor: C.mediumGray }}
-        >
-          <span className="text-2xl font-black tracking-wide" style={{ color: C.white }}>
-            {periodLabel(state.Period)}
-          </span>
-        </div>
-      </div>
-
-      {tickerText ? (
-        <div
-          className="flex min-h-10 items-center justify-center border-t-2 px-3 py-1 text-center text-sm font-bold uppercase leading-tight"
-          style={{ backgroundColor: C.red, borderColor: C.line, color: C.white }}
-        >
-          {tickerText}
-        </div>
-      ) : null}
     </section>
   );
 
   if (variant === "preview") {
     return (
-      <div className="relative flex h-[200px] w-full items-center justify-center overflow-hidden rounded border border-zinc-800 bg-zinc-950">
-        <div className="pointer-events-none origin-center scale-[0.72]">{scorebug}</div>
+      <div className="relative flex h-[220px] w-full items-center justify-center overflow-hidden rounded border border-zinc-800 bg-zinc-950">
+        <div className="pointer-events-none origin-center scale-[0.62]">{scorebug}</div>
       </div>
     );
   }
 
   return (
-    <main className="flex min-h-screen w-screen items-start justify-start bg-transparent p-4">{scorebug}</main>
+    <main className="box-border flex min-h-screen w-full max-w-none min-w-0 items-start justify-start bg-transparent px-2 py-3 sm:px-4 sm:py-4">
+      {scorebug}
+    </main>
   );
 }
