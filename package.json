@@ -1,7 +1,7 @@
 {
   "name": "hockey-scoreboard",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "scripts": {
     "dev:obs-overlay": "npm --prefix apps/obs-overlay run dev",
     "dev:desktop": "npm --prefix apps/desktop-host run tauri:dev",

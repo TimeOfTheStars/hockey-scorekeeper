@@ -15,6 +15,7 @@ async fn start_score_gateway(
     port: u16,
     test_mode: Option<bool>,
     ice_field: Option<String>,
+    name_mode: Option<String>,
 ) -> Result<String, String> {
     let mut g = gateway.lock().await;
     let test = test_mode.unwrap_or(false);
@@ -22,7 +23,11 @@ async fn start_score_gateway(
         .as_deref()
         .and_then(gateway::ActiveField::parse)
         .unwrap_or_default();
-    g.start(&app, api_url.trim().to_string(), port, test, field)
+    let mode = name_mode
+        .as_deref()
+        .and_then(gateway::TeamNameMode::parse)
+        .unwrap_or_default();
+    g.start(&app, api_url.trim().to_string(), port, test, field, mode)
         .await
 }
 
@@ -38,6 +43,17 @@ async fn set_scoreboard_field(
 }
 
 #[tauri::command]
+async fn set_scoreboard_name_mode(
+    gateway: State<'_, GatewayHandle>,
+    mode: String,
+) -> Result<(), String> {
+    let m = gateway::TeamNameMode::parse(&mode)
+        .ok_or_else(|| "Укажите режим: short или full".to_string())?;
+    let mut g = gateway.lock().await;
+    g.set_name_mode(m).await
+}
+
+#[tauri::command]
 async fn stop_score_gateway(gateway: State<'_, GatewayHandle>) -> Result<(), String> {
     let mut g = gateway.lock().await;
     g.stop().await
@@ -50,6 +66,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_score_gateway,
             set_scoreboard_field,
+            set_scoreboard_name_mode,
             stop_score_gateway
         ])
         .setup(|app| {

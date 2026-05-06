@@ -38,6 +38,24 @@ export interface ServerScoreboardRow {
 
 export type IceFieldId = "A" | "B";
 
+/** Какой вариант названий команд показывать в табло. */
+export type TeamNameMode = "short" | "full";
+
+/** Подменяет TeamA/TeamB на полные/короткие имена в зависимости от режима. */
+export function applyTeamNameMode<T extends { TeamA: string; TeamAFull: string; TeamB: string; TeamBFull: string }>(
+  state: T,
+  mode: TeamNameMode,
+): T {
+  if (mode !== "full") {
+    return state;
+  }
+  return {
+    ...state,
+    TeamA: state.TeamAFull?.trim() ? state.TeamAFull : state.TeamA,
+    TeamB: state.TeamBFull?.trim() ? state.TeamBFull : state.TeamB,
+  };
+}
+
 export function isNewServerSchema(o: object): boolean {
   const r = o as Record<string, unknown>;
   return "TeamHA" in r || "TeamHB" in r || "ScoreHA" in r || "ScoreHB" in r;

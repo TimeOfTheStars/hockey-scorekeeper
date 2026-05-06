@@ -10,11 +10,12 @@ import {
   Square,
   TestTube2,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { GameState } from "../../../packages/shared/types/gameState";
 import { defaultGameState } from "../../../packages/shared/types/gameState";
+import { applyTeamNameMode } from "../../../packages/shared/types/serverScoreboard";
 import { ObsScoreboardView } from "../../obs-overlay/src/obs-scoreboard/ObsScoreboardView";
-import { parseExternalStatePayload, type IceFieldId } from "./shared/parseExternalState";
+import { parseExternalStatePayload, type IceFieldId, type TeamNameMode } from "./shared/parseExternalState";
 
 type ValidateState = "idle" | "validating" | "ready" | "error";
 
@@ -30,17 +31,49 @@ export default function App() {
   const [obsUrl, setObsUrl] = useState<string | null>(null);
   const [serverRunning, setServerRunning] = useState(false);
   const [iceField, setIceField] = useState<IceFieldId>("A");
+  const [nameMode, setNameMode] = useState<TeamNameMode>("short");
   const [lastValidatedJson, setLastValidatedJson] = useState<unknown>(null);
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    if (lastValidatedJson == null) {
+    if (serverRunning) {
       return;
     }
-    const parsed = parseExternalStatePayload(lastValidatedJson, iceField);
+    if (lastValidatedJson == null) {
+      setPreview((prev) => applyTeamNameMode(prev, nameMode));
+      return;
+    }
+    const parsed = parseExternalStatePayload(lastValidatedJson, iceField, nameMode);
     if (parsed) {
       setPreview(parsed);
     }
-  }, [iceField, lastValidatedJson]);
+  }, [iceField, nameMode, lastValidatedJson, serverRunning]);
+
+  useEffect(() => {
+    if (!serverRunning || !obsUrl) {
+      return;
+    }
+    let cancelled = false;
+    const wsUrl = obsUrl.replace(/^http/, "ws").replace(/\/+$/, "") + "/ws";
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+    ws.onmessage = (event) => {
+      if (cancelled) return;
+      try {
+        const message = JSON.parse(event.data) as { type: string; payload: GameState };
+        if (message.type === "state" && message.payload) {
+          setPreview(message.payload);
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    return () => {
+      cancelled = true;
+      wsRef.current = null;
+      ws.close();
+    };
+  }, [serverRunning, obsUrl]);
 
   const statusLabel = useMemo(() => {
     if (validateState === "idle") return "Ожидание";
@@ -90,7 +123,7 @@ export default function App() {
       }
 
       const json = (await response.json()) as unknown;
-      const parsed = parseExternalStatePayload(json, iceField);
+      const parsed = parseExternalStatePayload(json, iceField, nameMode);
       if (!parsed) {
         throw new Error("Не удалось распарсить GameState из ответа.");
       }
@@ -116,6 +149,7 @@ export default function App() {
         port: localPort,
         testMode: false,
         iceField,
+        nameMode,
       });
       setObsUrl(url);
       setServerRunning(true);
@@ -135,11 +169,12 @@ export default function App() {
         port: DEFAULT_GATEWAY_PORT,
         testMode: true,
         iceField: "A",
+        nameMode,
       });
       setLocalPort(DEFAULT_GATEWAY_PORT);
       setObsUrl(url);
       setServerRunning(true);
-      setPreview(defaultGameState);
+      setPreview(applyTeamNameMode(defaultGameState, nameMode));
       setLastValidatedJson(null);
       setValidateState("idle");
     } catch (e) {
@@ -155,6 +190,20 @@ export default function App() {
     setError("");
     try {
       await invoke("set_scoreboard_field", { field: next });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onNameModeChange = async (next: TeamNameMode) => {
+    if (next === nameMode) return;
+    setNameMode(next);
+    if (!serverRunning) {
+      return;
+    }
+    setError("");
+    try {
+      await invoke("set_scoreboard_name_mode", { mode: next });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -253,6 +302,44 @@ export default function App() {
                       Поле B
                       <span className="mt-0.5 block text-[10px] font-normal uppercase tracking-wide text-zinc-500">
                         HB / GB
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <span className="mb-2 block text-xs font-medium text-zinc-400">Названия команд</span>
+                  <div
+                    className="inline-flex rounded-xl border border-zinc-700/80 bg-zinc-950/60 p-1"
+                    role="group"
+                    aria-label="Формат названий команд"
+                  >
+                    <button
+                      type="button"
+                      className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                        nameMode === "short"
+                          ? "bg-zinc-700 text-white shadow-sm"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                      onClick={() => void onNameModeChange("short")}
+                    >
+                      Короткое
+                      <span className="mt-0.5 block text-[10px] font-normal uppercase tracking-wide text-zinc-500">
+                        TeamHA
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                        nameMode === "full"
+                          ? "bg-zinc-700 text-white shadow-sm"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                      onClick={() => void onNameModeChange("full")}
+                    >
+                      Полное
+                      <span className="mt-0.5 block text-[10px] font-normal uppercase tracking-wide text-zinc-500">
+                        TeamHAFull
                       </span>
                     </button>
                   </div>

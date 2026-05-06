@@ -157,10 +157,59 @@ impl ActiveField {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum TeamNameMode {
+    #[default]
+    Short,
+    Full,
+}
+
+impl TeamNameMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "short" => Some(TeamNameMode::Short),
+            "full" => Some(TeamNameMode::Full),
+            _ => None,
+        }
+    }
+}
+
+fn apply_name_mode(state: Value, name_mode: TeamNameMode) -> Value {
+    if !matches!(name_mode, TeamNameMode::Full) {
+        return state;
+    }
+    let Some(mut obj) = state.as_object().cloned() else {
+        return state;
+    };
+    let team_a_full = obj
+        .get("TeamAFull")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let team_b_full = obj
+        .get("TeamBFull")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(name) = team_a_full {
+        obj.insert("TeamA".to_string(), Value::String(name));
+    }
+    if let Some(name) = team_b_full {
+        obj.insert("TeamB".to_string(), Value::String(name));
+    }
+    Value::Object(obj)
+}
+
 /// Снимок для OBS/WebSocket: ключи как в `GameState`.
-pub fn build_client_state(source: &Value, field: ActiveField, use_new_schema: bool) -> Value {
+pub fn build_client_state(
+    source: &Value,
+    field: ActiveField,
+    use_new_schema: bool,
+    name_mode: TeamNameMode,
+) -> Value {
     if !use_new_schema {
-        return shallow_merge(default_overlay_value(), source);
+        let merged = shallow_merge(default_overlay_value(), source);
+        return apply_name_mode(merged, name_mode);
     }
 
     let Some(obj) = source.as_object() else {
@@ -280,7 +329,7 @@ pub fn build_client_state(source: &Value, field: ActiveField, use_new_schema: bo
         pp_timer
     };
 
-    serde_json::json!({
+    let display = serde_json::json!({
         "TournamentTitle": tournament,
         "SeriesInfo": "",
         "BrandingImage": league_logo,
@@ -302,7 +351,8 @@ pub fn build_client_state(source: &Value, field: ActiveField, use_new_schema: bo
         "Period": period,
         "Running": running,
         "Visible": visible,
-    })
+    });
+    apply_name_mode(display, name_mode)
 }
 
 fn overlay_dist_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -331,6 +381,7 @@ pub struct GatewaySync {
     pub source: Value,
     pub field: ActiveField,
     pub use_new_schema: bool,
+    pub name_mode: TeamNameMode,
 }
 
 pub struct RuntimeHandles {
@@ -345,13 +396,13 @@ struct GatewayInner {
 
 async fn envelope_for_display_async(runtime: &RuntimeHandles) -> String {
     let g = runtime.sync.read().await;
-    let display = build_client_state(&g.source, g.field, g.use_new_schema);
+    let display = build_client_state(&g.source, g.field, g.use_new_schema, g.name_mode);
     serde_json::json!({ "type": "state", "payload": display }).to_string()
 }
 
 async fn get_state_json(State(inner): State<GatewayInner>) -> Result<Json<Value>, StatusCode> {
     let g = inner.runtime.sync.read().await;
-    let display = build_client_state(&g.source, g.field, g.use_new_schema);
+    let display = build_client_state(&g.source, g.field, g.use_new_schema, g.name_mode);
     Ok(Json(display))
 }
 
@@ -363,7 +414,7 @@ async fn ws_connected(mut socket: WebSocket, inner: GatewayInner) {
     let mut rx = inner.runtime.tx.subscribe();
     let initial = {
         let g = inner.runtime.sync.read().await;
-        build_client_state(&g.source, g.field, g.use_new_schema)
+        build_client_state(&g.source, g.field, g.use_new_schema, g.name_mode)
     };
     let envelope = serde_json::json!({ "type": "state", "payload": initial }).to_string();
     if socket.send(Message::Text(envelope.into())).await.is_err() {
@@ -489,6 +540,20 @@ impl GatewayController {
         Ok(())
     }
 
+    pub async fn set_name_mode(&mut self, mode: TeamNameMode) -> Result<(), String> {
+        let rt = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| "Сервер не запущен".to_string())?;
+        {
+            let mut w = rt.sync.write().await;
+            w.name_mode = mode;
+        }
+        let msg = envelope_for_display_async(rt).await;
+        let _ = rt.tx.send(msg);
+        Ok(())
+    }
+
     pub async fn start(
         &mut self,
         app_handle: &AppHandle,
@@ -496,6 +561,7 @@ impl GatewayController {
         port: u16,
         test_mode: bool,
         initial_field: ActiveField,
+        initial_name_mode: TeamNameMode,
     ) -> Result<String, String> {
         if !test_mode {
             if !api_url.starts_with("http://") && !api_url.starts_with("https://") {
@@ -523,6 +589,7 @@ impl GatewayController {
             source: new_schema_defaults(),
             field: initial_field,
             use_new_schema: true,
+            name_mode: initial_name_mode,
         }));
         let (tx, _rx) = broadcast::channel::<String>(32);
         let runtime = Arc::new(RuntimeHandles {
