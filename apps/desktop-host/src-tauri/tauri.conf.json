@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "hockey-desktop-host",
+  "productName": "hockey-scorekeeper",
   "version": "2.0.0",
-  "identifier": "com.hockey.desktophost",
+  "identifier": "com.hockey.scorekeeper",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5174",
