@@ -149,7 +149,7 @@ jobs:
             cp "$f" "release-upload/$out"
           done
 
-          NOTES="Автоматическая сборка Tauri приложения.\nВерсия: ${VERSION} (${REF_NAME})"
+          NOTES="Автоматическая сборка Tauri приложения. Версия: ${VERSION} (${REF_NAME})"
 
           gh release create "$TAG" \
             --repo "$REPO" \

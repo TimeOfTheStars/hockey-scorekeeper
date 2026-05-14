@@ -13,17 +13,43 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
 use tower_http::services::{ServeDir, ServeFile};
 
-/// Дефолт исходного состояния (под новый формат API). Используется в режиме «Тест».
-fn default_source_value() -> Value {
-    serde_json::json!({
-        "TournamentTitle": "Регулярный турнир по хоккею с шайбой",
-        "num_fields": 1,
-        "fields": {
+fn default_source_value_for(num_fields: i64) -> Value {
+    let fields = if num_fields >= 2 {
+        serde_json::json!({
+            "A": {
+                "TeamH": "A1",
+                "TeamHFull": "Team A1",
+                "TeamG": "B1",
+                "TeamGFull": "Team B1",
+                "ScoreH": 0,
+                "ScoreG": 0,
+                "ShotsH": 0,
+                "ShotsG": 0,
+                "LogoH": "team-a.png",
+                "LogoG": "team-b.png",
+                "Penalties": { "H": [], "G": [] }
+            },
+            "B": {
+                "TeamH": "A2",
+                "TeamHFull": "Team A2",
+                "TeamG": "B2",
+                "TeamGFull": "Team B2",
+                "ScoreH": 0,
+                "ScoreG": 0,
+                "ShotsH": 0,
+                "ShotsG": 0,
+                "LogoH": "team-a.png",
+                "LogoG": "team-b.png",
+                "Penalties": { "H": [], "G": [] }
+            }
+        })
+    } else {
+        serde_json::json!({
             "A": {
                 "TeamH": "A",
                 "TeamHFull": "Team A",
@@ -36,7 +62,13 @@ fn default_source_value() -> Value {
                 "LogoH": "team-a.png",
                 "LogoG": "team-b.png"
             }
-        },
+        })
+    };
+
+    let mut value = serde_json::json!({
+        "TournamentTitle": "Регулярный турнир по хоккею с шайбой",
+        "num_fields": num_fields.max(1),
+        "fields": fields,
         "Timer": 1200,
         "timer_running": false,
         "timer_default": 1200,
@@ -45,9 +77,13 @@ fn default_source_value() -> Value {
         "auto_next_period": false,
         "logoLeagues": "",
         "visible": true,
-        "PenaltyH": null,
-        "PenaltyG": null
-    })
+    });
+    if num_fields < 2 {
+        let obj = value.as_object_mut().expect("default source must be object");
+        obj.insert("PenaltyH".to_string(), Value::Null);
+        obj.insert("PenaltyG".to_string(), Value::Null);
+    }
+    value
 }
 
 fn extract_patch(raw: Value) -> Value {
@@ -121,6 +157,28 @@ impl TeamNameMode {
         match s.trim().to_ascii_lowercase().as_str() {
             "short" => Some(TeamNameMode::Short),
             "full" => Some(TeamNameMode::Full),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum SourceMode {
+    Server,
+    Local,
+}
+
+impl Default for SourceMode {
+    fn default() -> Self {
+        SourceMode::Server
+    }
+}
+
+impl SourceMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "server" => Some(SourceMode::Server),
+            "local" => Some(SourceMode::Local),
             _ => None,
         }
     }
@@ -318,7 +376,12 @@ struct GatewayInner {
 async fn envelope_for_display_async(runtime: &RuntimeHandles) -> String {
     let g = runtime.sync.read().await;
     let display = build_client_state(&g.source, g.field, g.name_mode);
-    serde_json::json!({ "type": "state", "payload": display }).to_string()
+    serde_json::json!({
+        "type": "state",
+        "payload": display,
+        "source": g.source.clone(),
+    })
+    .to_string()
 }
 
 async fn get_state_json(State(inner): State<GatewayInner>) -> Result<Json<Value>, StatusCode> {
@@ -333,11 +396,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(inner): State<GatewayInner>) -> 
 
 async fn ws_connected(mut socket: WebSocket, inner: GatewayInner) {
     let mut rx = inner.runtime.tx.subscribe();
-    let initial = {
-        let g = inner.runtime.sync.read().await;
-        build_client_state(&g.source, g.field, g.name_mode)
-    };
-    let envelope = serde_json::json!({ "type": "state", "payload": initial }).to_string();
+    let envelope = envelope_for_display_async(&inner.runtime).await;
     if socket.send(Message::Text(envelope.into())).await.is_err() {
         return;
     }
@@ -416,11 +475,91 @@ async fn poll_loop(
     }
 }
 
+async fn tick_loop(runtime: Arc<RuntimeHandles>, cancel: CancellationToken) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => {
+                let changed = {
+                    let mut w = runtime.sync.write().await;
+                    let Some(obj) = w.source.as_object_mut() else { continue; };
+                    let running = obj.get("timer_running").and_then(Value::as_bool).unwrap_or(false);
+                    let timer = obj.get("Timer").and_then(Value::as_i64).unwrap_or(0);
+                    if running && timer > 0 {
+                        let next = timer - 1;
+                        obj.insert("Timer".to_string(), Value::from(next));
+                        if next == 0 {
+                            obj.insert("timer_running".to_string(), Value::Bool(false));
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if changed {
+                    let msg = envelope_for_display_async(&runtime).await;
+                    let _ = runtime.tx.send(msg);
+                }
+            }
+        }
+    }
+}
+
+fn source_obj_mut(value: &mut Value) -> Option<&mut Map<String, Value>> {
+    value.as_object_mut()
+}
+
+fn field_map_mut<'a>(source: &'a mut Value, field: ActiveField) -> Option<&'a mut Map<String, Value>> {
+    let obj = source.as_object_mut()?;
+    let fields_entry = obj
+        .entry("fields".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let fields_obj = fields_entry.as_object_mut()?;
+    let key = field.key().to_string();
+    let f = fields_entry_or_insert(fields_obj, key)?;
+    f.as_object_mut()
+}
+
+fn fields_entry_or_insert<'a>(
+    fields_obj: &'a mut Map<String, Value>,
+    key: String,
+) -> Option<&'a mut Value> {
+    if !fields_obj.contains_key(&key) {
+        fields_obj.insert(key.clone(), Value::Object(Map::new()));
+    }
+    fields_obj.get_mut(&key)
+}
+
+fn team_keys(team: char) -> Option<(&'static str, &'static str, &'static str, &'static str, &'static str)> {
+    match team.to_ascii_uppercase() {
+        'H' => Some(("TeamH", "TeamHFull", "ScoreH", "ShotsH", "LogoH")),
+        'G' => Some(("TeamG", "TeamGFull", "ScoreG", "ShotsG", "LogoG")),
+        _ => None,
+    }
+}
+
+fn parse_field(s: &str) -> Option<ActiveField> {
+    ActiveField::parse(s)
+}
+
+fn parse_team(s: &str) -> Option<char> {
+    let upper = s.trim().to_ascii_uppercase();
+    let c = upper.chars().next()?;
+    match c {
+        'H' | 'G' => Some(c),
+        _ => None,
+    }
+}
+
 pub struct GatewayController {
     cancel: Option<CancellationToken>,
     server_task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     poller_task: Option<tokio::task::JoinHandle<()>>,
+    tick_task: Option<tokio::task::JoinHandle<()>>,
     pub runtime: Option<Arc<RuntimeHandles>>,
+    pub bound_port: Option<u16>,
 }
 
 impl GatewayController {
@@ -429,7 +568,9 @@ impl GatewayController {
             cancel: None,
             server_task: None,
             poller_task: None,
+            tick_task: None,
             runtime: None,
+            bound_port: None,
         }
     }
 
@@ -444,36 +585,268 @@ impl GatewayController {
         if let Some(h) = self.poller_task.take() {
             h.await.map_err(|e| format!("poller join: {e}"))?;
         }
+        if let Some(h) = self.tick_task.take() {
+            h.await.map_err(|e| format!("tick join: {e}"))?;
+        }
         self.runtime = None;
+        self.bound_port = None;
         Ok(())
     }
 
     pub async fn set_field(&mut self, field: ActiveField) -> Result<(), String> {
-        let rt = self
-            .runtime
-            .as_ref()
-            .ok_or_else(|| "Сервер не запущен".to_string())?;
+        let rt = self.runtime_ref()?;
         {
             let mut w = rt.sync.write().await;
             w.field = field;
         }
-        let msg = envelope_for_display_async(rt).await;
-        let _ = rt.tx.send(msg);
+        self.broadcast(rt).await;
         Ok(())
     }
 
     pub async fn set_name_mode(&mut self, mode: TeamNameMode) -> Result<(), String> {
-        let rt = self
-            .runtime
-            .as_ref()
-            .ok_or_else(|| "Сервер не запущен".to_string())?;
+        let rt = self.runtime_ref()?;
         {
             let mut w = rt.sync.write().await;
             w.name_mode = mode;
         }
-        let msg = envelope_for_display_async(rt).await;
-        let _ = rt.tx.send(msg);
+        self.broadcast(rt).await;
         Ok(())
+    }
+
+    fn runtime_ref(&self) -> Result<Arc<RuntimeHandles>, String> {
+        self.runtime
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "Сервер не запущен".to_string())
+    }
+
+    async fn broadcast(&self, rt: Arc<RuntimeHandles>) {
+        let msg = envelope_for_display_async(&rt).await;
+        let _ = rt.tx.send(msg);
+    }
+
+    async fn mutate<F>(&self, mutator: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut Value),
+    {
+        let rt = self.runtime_ref()?;
+        {
+            let mut w = rt.sync.write().await;
+            mutator(&mut w.source);
+        }
+        self.broadcast(rt).await;
+        Ok(())
+    }
+
+    pub async fn set_score(&self, field: ActiveField, team: char, value: i64) -> Result<(), String> {
+        let (_, _, score_key, _, _) = team_keys(team).ok_or_else(|| "team: H или G".to_string())?;
+        self.mutate(|src| {
+            if let Some(f) = field_map_mut(src, field) {
+                f.insert(score_key.to_string(), Value::from(value.max(0)));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_shots(&self, field: ActiveField, team: char, value: i64) -> Result<(), String> {
+        let (_, _, _, shots_key, _) = team_keys(team).ok_or_else(|| "team: H или G".to_string())?;
+        self.mutate(|src| {
+            if let Some(f) = field_map_mut(src, field) {
+                f.insert(shots_key.to_string(), Value::from(value.max(0)));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_team_name(
+        &self,
+        field: ActiveField,
+        team: char,
+        short: String,
+        full: String,
+    ) -> Result<(), String> {
+        let (short_key, full_key, _, _, _) =
+            team_keys(team).ok_or_else(|| "team: H или G".to_string())?;
+        self.mutate(|src| {
+            if let Some(f) = field_map_mut(src, field) {
+                f.insert(short_key.to_string(), Value::String(short));
+                f.insert(full_key.to_string(), Value::String(full));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_team_logo(
+        &self,
+        field: ActiveField,
+        team: char,
+        url: String,
+    ) -> Result<(), String> {
+        let (_, _, _, _, logo_key) =
+            team_keys(team).ok_or_else(|| "team: H или G".to_string())?;
+        self.mutate(|src| {
+            if let Some(f) = field_map_mut(src, field) {
+                f.insert(logo_key.to_string(), Value::String(url));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_penalty(
+        &self,
+        field: ActiveField,
+        team: char,
+        value: Option<String>,
+    ) -> Result<(), String> {
+        let team_upper = team.to_ascii_uppercase();
+        if team_upper != 'H' && team_upper != 'G' {
+            return Err("team: H или G".to_string());
+        }
+        self.mutate(|src| {
+            let num_fields = src
+                .get("num_fields")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .max(1);
+            if num_fields >= 2 {
+                if let Some(f) = field_map_mut(src, field) {
+                    let pen_entry = f
+                        .entry("Penalties".to_string())
+                        .or_insert_with(|| serde_json::json!({"H": [], "G": []}));
+                    if let Some(pen_obj) = pen_entry.as_object_mut() {
+                        let key = team_upper.to_string();
+                        let arr = match value.as_ref() {
+                            Some(v) if !v.trim().is_empty() => {
+                                Value::Array(vec![Value::String(v.trim().to_string())])
+                            }
+                            _ => Value::Array(Vec::new()),
+                        };
+                        pen_obj.insert(key, arr);
+                    }
+                }
+            } else if let Some(obj) = src.as_object_mut() {
+                let key = format!("Penalty{}", team_upper);
+                let val = match value.as_ref() {
+                    Some(v) if !v.trim().is_empty() => Value::String(v.trim().to_string()),
+                    _ => Value::Null,
+                };
+                obj.insert(key, val);
+            }
+        })
+        .await
+    }
+
+    pub async fn set_tournament(
+        &self,
+        title: String,
+        league_logo: String,
+    ) -> Result<(), String> {
+        self.mutate(|src| {
+            if let Some(obj) = source_obj_mut(src) {
+                obj.insert("TournamentTitle".to_string(), Value::String(title));
+                obj.insert("logoLeagues".to_string(), Value::String(league_logo));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_visible(&self, value: bool) -> Result<(), String> {
+        self.mutate(|src| {
+            if let Some(obj) = source_obj_mut(src) {
+                obj.insert("visible".to_string(), Value::Bool(value));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_period(&self, value: i64, label: String) -> Result<(), String> {
+        self.mutate(|src| {
+            if let Some(obj) = source_obj_mut(src) {
+                obj.insert("Period".to_string(), Value::from(value.max(1)));
+                obj.insert("Period_label".to_string(), Value::String(label));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_timer(&self, seconds: i64) -> Result<(), String> {
+        self.mutate(|src| {
+            if let Some(obj) = source_obj_mut(src) {
+                obj.insert("Timer".to_string(), Value::from(seconds.max(0)));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_timer_default(&self, seconds: i64) -> Result<(), String> {
+        self.mutate(|src| {
+            if let Some(obj) = source_obj_mut(src) {
+                obj.insert("timer_default".to_string(), Value::from(seconds.max(0)));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_timer_running(&self, value: bool) -> Result<(), String> {
+        self.mutate(|src| {
+            if let Some(obj) = source_obj_mut(src) {
+                obj.insert("timer_running".to_string(), Value::Bool(value));
+            }
+        })
+        .await
+    }
+
+    pub async fn reset_timer(&self) -> Result<(), String> {
+        self.mutate(|src| {
+            if let Some(obj) = source_obj_mut(src) {
+                let def = obj.get("timer_default").and_then(Value::as_i64).unwrap_or(1200);
+                obj.insert("Timer".to_string(), Value::from(def));
+                obj.insert("timer_running".to_string(), Value::Bool(false));
+            }
+        })
+        .await
+    }
+
+    pub async fn set_num_fields(&self, value: i64) -> Result<(), String> {
+        let target = value.clamp(1, 2);
+        self.mutate(|src| {
+            if let Some(obj) = source_obj_mut(src) {
+                obj.insert("num_fields".to_string(), Value::from(target));
+                // Гарантируем структуру fields соответственно target.
+                let fields_entry = obj
+                    .entry("fields".to_string())
+                    .or_insert_with(|| Value::Object(Map::new()));
+                if let Some(fields_obj) = fields_entry.as_object_mut() {
+                    if !fields_obj.contains_key("A") {
+                        fields_obj.insert("A".to_string(), default_field_object(1));
+                    }
+                    if target >= 2 {
+                        if !fields_obj.contains_key("B") {
+                            fields_obj.insert("B".to_string(), default_field_object(2));
+                        }
+                        // обеспечим наличие Penalties в обоих
+                        ensure_penalties_in_field(fields_obj, "A");
+                        ensure_penalties_in_field(fields_obj, "B");
+                    } else {
+                        // 1-полевой: убираем Penalties из fields, добавляем top-level
+                        if let Some(a) = fields_obj.get_mut("A").and_then(|v| v.as_object_mut()) {
+                            a.remove("Penalties");
+                        }
+                        if !obj.contains_key("PenaltyH") {
+                            obj.insert("PenaltyH".to_string(), Value::Null);
+                        }
+                        if !obj.contains_key("PenaltyG") {
+                            obj.insert("PenaltyG".to_string(), Value::Null);
+                        }
+                    }
+                }
+                if target >= 2 {
+                    obj.remove("PenaltyH");
+                    obj.remove("PenaltyG");
+                }
+            }
+        })
+        .await
     }
 
     pub async fn start(
@@ -481,11 +854,12 @@ impl GatewayController {
         app_handle: &AppHandle,
         api_url: String,
         port: u16,
-        test_mode: bool,
+        source_mode: SourceMode,
         initial_field: ActiveField,
         initial_name_mode: TeamNameMode,
+        initial_num_fields: i64,
     ) -> Result<String, String> {
-        if !test_mode {
+        if matches!(source_mode, SourceMode::Server) {
             if !api_url.starts_with("http://") && !api_url.starts_with("https://") {
                 return Err("URL должен начинаться с http:// или https://".to_string());
             }
@@ -507,8 +881,13 @@ impl GatewayController {
             .local_addr()
             .map_err(|e| format!("local_addr: {e}"))?;
 
+        let initial_source = match source_mode {
+            SourceMode::Server => default_source_value_for(initial_num_fields.max(1)),
+            SourceMode::Local => default_source_value_for(initial_num_fields.clamp(1, 2)),
+        };
+
         let sync = Arc::new(RwLock::new(GatewaySync {
-            source: default_source_value(),
+            source: initial_source,
             field: initial_field,
             name_mode: initial_name_mode,
         }));
@@ -533,23 +912,70 @@ impl GatewayController {
                 .await
         });
 
-        let poller_task = if test_mode {
-            let msg = envelope_for_display_async(&runtime).await;
-            let _ = tx.send(msg);
-            None
-        } else {
-            let poll_cancel = token.clone();
-            let rt = runtime.clone();
-            Some(tokio::spawn(async move {
-                poll_loop(api_url, rt, poll_cancel).await;
-            }))
+        let (poller_task, tick_task) = match source_mode {
+            SourceMode::Server => {
+                let poll_cancel = token.clone();
+                let rt = runtime.clone();
+                let handle = tokio::spawn(async move {
+                    poll_loop(api_url, rt, poll_cancel).await;
+                });
+                (Some(handle), None)
+            }
+            SourceMode::Local => {
+                let msg = envelope_for_display_async(&runtime).await;
+                let _ = tx.send(msg);
+                let tick_cancel = token.clone();
+                let rt = runtime.clone();
+                let handle = tokio::spawn(async move {
+                    tick_loop(rt, tick_cancel).await;
+                });
+                (None, Some(handle))
+            }
         };
 
         self.cancel = Some(token);
         self.server_task = Some(server_task);
         self.poller_task = poller_task;
+        self.tick_task = tick_task;
         self.runtime = Some(runtime);
+        self.bound_port = Some(bound.port());
 
         Ok(format!("http://127.0.0.1:{}/", bound.port()))
     }
+}
+
+fn default_field_object(idx: i64) -> Value {
+    let suffix = if idx <= 1 { "" } else { "2" };
+    serde_json::json!({
+        "TeamH": format!("A{}", suffix),
+        "TeamHFull": format!("Team A{}", suffix),
+        "TeamG": format!("B{}", suffix),
+        "TeamGFull": format!("Team B{}", suffix),
+        "ScoreH": 0,
+        "ScoreG": 0,
+        "ShotsH": 0,
+        "ShotsG": 0,
+        "LogoH": "team-a.png",
+        "LogoG": "team-b.png",
+        "Penalties": { "H": [], "G": [] }
+    })
+}
+
+fn ensure_penalties_in_field(fields_obj: &mut Map<String, Value>, key: &str) {
+    if let Some(f) = fields_obj.get_mut(key).and_then(|v| v.as_object_mut()) {
+        if !f.contains_key("Penalties") {
+            f.insert(
+                "Penalties".to_string(),
+                serde_json::json!({"H": [], "G": []}),
+            );
+        }
+    }
+}
+
+pub fn parse_field_arg(s: &str) -> Result<ActiveField, String> {
+    parse_field(s).ok_or_else(|| "field: A или B".to_string())
+}
+
+pub fn parse_team_arg(s: &str) -> Result<char, String> {
+    parse_team(s).ok_or_else(|| "team: H или G".to_string())
 }
