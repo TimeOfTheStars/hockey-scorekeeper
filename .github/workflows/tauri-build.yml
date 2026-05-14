@@ -38,12 +38,18 @@ jobs:
             apps/obs-overlay/package-lock.json
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          workspaces: apps/desktop-host/src-tauri
+          toolchain: stable
+          cache-workspaces: apps/desktop-host/src-tauri
+
+      - name: Verify Rust toolchain
+        shell: bash
+        run: |
+          rustup default stable
+          rustup show
+          cargo --version
+          rustc --version
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
