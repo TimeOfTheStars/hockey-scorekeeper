@@ -149,12 +149,24 @@ jobs:
             cp "$f" "release-upload/$out"
           done
 
-          NOTES="Автоматическая сборка Tauri приложения. Версия: ${VERSION} (${REF_NAME})"
+          cat > release-notes.md <<EOF
+          Автоматическая сборка Tauri приложения. Версия: ${VERSION} (${REF_NAME})
+
+          ## macOS — если «Приложение повреждено и не может быть открыто»
+
+          Сборка подписана ad-hoc (без коммерческого Apple Developer ID). После скачивания DMG из браузера macOS ставит quarantine-флаг — Gatekeeper блокирует запуск с этой формулировкой.
+
+          **Решение.** Перенеси \`HockeyDesktopHost.app\` в \`/Applications\`, затем в Терминале:
+
+              xattr -dr com.apple.quarantine /Applications/HockeyDesktopHost.app
+
+          После этого приложение запустится. Альтернатива (без терминала): ПКМ по .app в Finder → «Открыть» → подтвердить (один раз).
+          EOF
 
           gh release create "$TAG" \
             --repo "$REPO" \
             --target "${{ github.sha }}" \
             --title "$TITLE" \
-            --notes "$NOTES" \
+            --notes-file release-notes.md \
             $PRERELEASE \
             release-upload/*
