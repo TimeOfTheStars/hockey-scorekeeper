@@ -287,7 +287,7 @@ export default function App() {
                     >
                       Поле A
                       <span className="mt-0.5 block text-[10px] font-normal uppercase tracking-wide text-zinc-500">
-                        HA / GA
+                        fields.A
                       </span>
                     </button>
                     <button
@@ -301,7 +301,7 @@ export default function App() {
                     >
                       Поле B
                       <span className="mt-0.5 block text-[10px] font-normal uppercase tracking-wide text-zinc-500">
-                        HB / GB
+                        fields.B
                       </span>
                     </button>
                   </div>
@@ -325,7 +325,7 @@ export default function App() {
                     >
                       Короткое
                       <span className="mt-0.5 block text-[10px] font-normal uppercase tracking-wide text-zinc-500">
-                        TeamHA
+                        TeamH
                       </span>
                     </button>
                     <button
@@ -339,7 +339,7 @@ export default function App() {
                     >
                       Полное
                       <span className="mt-0.5 block text-[10px] font-normal uppercase tracking-wide text-zinc-500">
-                        TeamHAFull
+                        TeamHFull
                       </span>
                     </button>
                   </div>
@@ -487,7 +487,7 @@ export default function App() {
               <div>
                 <h3 className="font-semibold text-zinc-300">Поле льда</h3>
                 <p className="mt-1 text-zinc-500">
-                  Какую пару команд из ответа подставить в табло: корт A (HA/GA) или B (HB/GB). При уже запущенном
+                  Какую пару команд из ответа подставить в табло: корт A (fields.A) или B (fields.B). При уже запущенном
                   сервере переключение сразу уходит в шлюз и обновляет картинку в OBS.
                 </p>
               </div>

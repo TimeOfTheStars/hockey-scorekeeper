@@ -18,75 +18,36 @@ use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
 use tower_http::services::{ServeDir, ServeFile};
 
-/// Дефолты для **новой** схемы API (HA/GA/HB/GB) при merge с ответом.
-fn new_schema_defaults() -> Value {
+/// Дефолт исходного состояния (под новый формат API). Используется в режиме «Тест».
+fn default_source_value() -> Value {
     serde_json::json!({
         "TournamentTitle": "Регулярный турнир по хоккею с шайбой",
-        "TeamHA": "A",
-        "TeamHAFull": "Team A",
-        "TeamGA": "B",
-        "TeamGAFull": "Team B",
-        "TeamHB": "A",
-        "TeamHBFull": "Team A",
-        "TeamGB": "B",
-        "TeamGBFull": "Team B",
-        "PenaltyH": "None",
-        "PenaltyG": "None",
-        "ScoreHA": 0,
-        "ScoreGA": 0,
-        "ScoreHB": 0,
-        "ScoreGB": 0,
-        "ShotsH": 0,
-        "ShotsG": 0,
-        "LogoHA": "team-a.png",
-        "LogoGA": "team-b.png",
-        "LogoHB": "team-a.png",
-        "LogoGB": "team-b.png",
+        "num_fields": 1,
+        "fields": {
+            "A": {
+                "TeamH": "A",
+                "TeamHFull": "Team A",
+                "TeamG": "B",
+                "TeamGFull": "Team B",
+                "ScoreH": 0,
+                "ScoreG": 0,
+                "ShotsH": 0,
+                "ShotsG": 0,
+                "LogoH": "team-a.png",
+                "LogoG": "team-b.png"
+            }
+        },
+        "Timer": 1200,
+        "timer_running": false,
+        "timer_default": 1200,
+        "Period": 1,
+        "Period_label": "1-й",
+        "auto_next_period": false,
         "logoLeagues": "",
-        "Timer": "20:00",
-        "Period": 1,
-        "Running": false,
-        "Visible": true,
-        "PowerPlayTimer": "02:00",
-        "PowerPlayActive": false
+        "visible": true,
+        "PenaltyH": null,
+        "PenaltyG": null
     })
-}
-
-/// Дефолты **оверлея** (ключи GameState) для старого API без HA/HB.
-fn default_overlay_value() -> Value {
-    serde_json::json!({
-        "TournamentTitle": "Регулярный турнир по хоккею с шайбой",
-        "SeriesInfo": "",
-        "BrandingImage": "",
-        "TeamA": "A",
-        "TeamAFull": "Team A",
-        "TeamB": "B",
-        "TeamBFull": "Team B",
-        "penalty_a": "None",
-        "penalty_b": "None",
-        "ScoreA": 0,
-        "ScoreB": 0,
-        "ShotsA": 0,
-        "ShotsB": 0,
-        "logo_a": "team-a.png",
-        "logo_b": "team-b.png",
-        "Timer": "20:00",
-        "PowerPlayTimer": "02:00",
-        "PowerPlayActive": false,
-        "Period": 1,
-        "Running": false,
-        "Visible": true
-    })
-}
-
-fn shallow_merge(base: Value, patch: &Value) -> Value {
-    let mut b = base.as_object().cloned().unwrap_or_default();
-    if let Some(p) = patch.as_object() {
-        for (k, v) in p {
-            b.insert(k.clone(), v.clone());
-        }
-    }
-    Value::Object(b)
 }
 
 fn extract_patch(raw: Value) -> Value {
@@ -95,30 +56,6 @@ fn extract_patch(raw: Value) -> Value {
     } else {
         raw
     }
-}
-
-/// Только по **сырому** фрагменту ответа (до merge с дефолтами), иначе HA-ключи из дефолтов ломают legacy.
-fn is_new_schema_patch(patch: &Value) -> bool {
-    patch
-        .as_object()
-        .map(|o| {
-            o.contains_key("TeamHA")
-                || o.contains_key("TeamHB")
-                || o.contains_key("ScoreHA")
-                || o.contains_key("ScoreHB")
-        })
-        .unwrap_or(false)
-}
-
-fn merge_incoming(raw: Value) -> (Value, bool) {
-    let patch = extract_patch(raw);
-    let new_schema = is_new_schema_patch(&patch);
-    let merged = if new_schema {
-        shallow_merge(new_schema_defaults(), &patch)
-    } else {
-        shallow_merge(default_overlay_value(), &patch)
-    };
-    (merged, new_schema)
 }
 
 fn as_str(v: Option<&Value>) -> String {
@@ -140,6 +77,14 @@ fn as_bool(v: Option<&Value>, default: bool) -> bool {
     v.and_then(|x| x.as_bool()).unwrap_or(default)
 }
 
+/// Секунды → "MM:SS".
+fn format_timer_seconds(total: i64) -> String {
+    let safe = if total > 0 { total } else { 0 };
+    let m = safe / 60;
+    let s = safe % 60;
+    format!("{:02}:{:02}", m, s)
+}
+
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum ActiveField {
     #[default]
@@ -153,6 +98,13 @@ impl ActiveField {
             "A" => Some(ActiveField::A),
             "B" => Some(ActiveField::B),
             _ => None,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            ActiveField::A => "A",
+            ActiveField::B => "B",
         }
     }
 }
@@ -200,134 +152,104 @@ fn apply_name_mode(state: Value, name_mode: TeamNameMode) -> Value {
     Value::Object(obj)
 }
 
+fn first_penalty_from_array(v: Option<&Value>) -> String {
+    let Some(arr) = v.and_then(|x| x.as_array()) else {
+        return "None".to_string();
+    };
+    for item in arr {
+        let s = match item {
+            Value::String(s) => s.trim().to_string(),
+            Value::Number(n) => n.to_string(),
+            _ => continue,
+        };
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    "None".to_string()
+}
+
+fn top_level_penalty(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => {
+            let t = s.trim();
+            if t.is_empty() {
+                "None".to_string()
+            } else {
+                t.to_string()
+            }
+        }
+        _ => "None".to_string(),
+    }
+}
+
 /// Снимок для OBS/WebSocket: ключи как в `GameState`.
 pub fn build_client_state(
     source: &Value,
     field: ActiveField,
-    use_new_schema: bool,
     name_mode: TeamNameMode,
 ) -> Value {
-    if !use_new_schema {
-        let merged = shallow_merge(default_overlay_value(), source);
-        return apply_name_mode(merged, name_mode);
-    }
-
     let Some(obj) = source.as_object() else {
-        return default_overlay_value();
+        return Value::Object(Default::default());
+    };
+
+    let num_fields = as_i64(obj.get("num_fields")).max(1);
+    let effective_field = if matches!(field, ActiveField::B) && num_fields >= 2 {
+        ActiveField::B
+    } else {
+        ActiveField::A
+    };
+
+    let field_obj = obj
+        .get("fields")
+        .and_then(|v| v.get(effective_field.key()))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let fo = field_obj.as_object();
+
+    let team_a = as_str(fo.and_then(|o| o.get("TeamH")));
+    let team_af = as_str(fo.and_then(|o| o.get("TeamHFull")));
+    let team_b = as_str(fo.and_then(|o| o.get("TeamG")));
+    let team_bf = as_str(fo.and_then(|o| o.get("TeamGFull")));
+    let sa = as_i64(fo.and_then(|o| o.get("ScoreH")));
+    let sb = as_i64(fo.and_then(|o| o.get("ScoreG")));
+    let sha = as_i64(fo.and_then(|o| o.get("ShotsH")));
+    let shb = as_i64(fo.and_then(|o| o.get("ShotsG")));
+    let la = as_str(fo.and_then(|o| o.get("LogoH")));
+    let lb = as_str(fo.and_then(|o| o.get("LogoG")));
+
+    let (pa, pb) = if num_fields >= 2 {
+        let penalties = fo.and_then(|o| o.get("Penalties"));
+        (
+            first_penalty_from_array(penalties.and_then(|p| p.get("H"))),
+            first_penalty_from_array(penalties.and_then(|p| p.get("G"))),
+        )
+    } else {
+        (
+            top_level_penalty(obj.get("PenaltyH")),
+            top_level_penalty(obj.get("PenaltyG")),
+        )
     };
 
     let title_raw = as_str(obj.get("TournamentTitle"));
-    let def_title = default_overlay_value()["TournamentTitle"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
     let tournament = if title_raw.is_empty() {
-        def_title
+        "Регулярный турнир по хоккею с шайбой".to_string()
     } else {
         title_raw
     };
-    let timer = as_str(obj.get("Timer"));
-    let period = as_i64(obj.get("Period")).max(1) as i64;
-    let running = as_bool(obj.get("Running"), false);
-    let visible = as_bool(obj.get("Visible"), true);
-    let pp_timer = as_str(obj.get("PowerPlayTimer"));
-    let pp_active = as_bool(obj.get("PowerPlayActive"), false);
+    let period = as_i64(obj.get("Period")).max(1);
+    let running = as_bool(obj.get("timer_running"), false);
+    let visible = as_bool(obj.get("visible"), true);
     let league_logo = as_str(obj.get("logoLeagues"));
+    let timer_sec = as_i64(obj.get("Timer"));
+    let timer_o = format_timer_seconds(timer_sec);
 
-    let (team_a, team_af, team_b, team_bf, pa, pb, sa, sb, sha, shb, la, lb): (
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        i64,
-        i64,
-        i64,
-        i64,
-        String,
-        String,
-    ) = match field {
-        ActiveField::A => (
-            as_str(obj.get("TeamHA")),
-            as_str(obj.get("TeamHAFull")),
-            as_str(obj.get("TeamGA")),
-            as_str(obj.get("TeamGAFull")),
-            as_str(obj.get("PenaltyH")),
-            as_str(obj.get("PenaltyG")),
-            as_i64(obj.get("ScoreHA")),
-            as_i64(obj.get("ScoreGA")),
-            as_i64(obj.get("ShotsH")),
-            as_i64(obj.get("ShotsG")),
-            as_str(obj.get("LogoHA")),
-            as_str(obj.get("LogoGA")),
-        ),
-        ActiveField::B => (
-            as_str(obj.get("TeamHB")),
-            as_str(obj.get("TeamHBFull")),
-            as_str(obj.get("TeamGB")),
-            as_str(obj.get("TeamGBFull")),
-            as_str(obj.get("PenaltyH")),
-            as_str(obj.get("PenaltyG")),
-            as_i64(obj.get("ScoreHB")),
-            as_i64(obj.get("ScoreGB")),
-            as_i64(obj.get("ShotsH")),
-            as_i64(obj.get("ShotsG")),
-            as_str(obj.get("LogoHB")),
-            as_str(obj.get("LogoGB")),
-        ),
-    };
-
-    let team_a_o = if team_a.is_empty() {
-        "A".to_string()
-    } else {
-        team_a
-    };
-    let team_af_o = if team_af.is_empty() {
-        "Team A".to_string()
-    } else {
-        team_af
-    };
-    let team_b_o = if team_b.is_empty() {
-        "B".to_string()
-    } else {
-        team_b
-    };
-    let team_bf_o = if team_bf.is_empty() {
-        "Team B".to_string()
-    } else {
-        team_bf
-    };
-    let pa_o = if pa.is_empty() {
-        "None".to_string()
-    } else {
-        pa
-    };
-    let pb_o = if pb.is_empty() {
-        "None".to_string()
-    } else {
-        pb
-    };
-    let la_o = if la.is_empty() {
-        "team-a.png".to_string()
-    } else {
-        la
-    };
-    let lb_o = if lb.is_empty() {
-        "team-b.png".to_string()
-    } else {
-        lb
-    };
-    let timer_o = if timer.is_empty() {
-        "20:00".to_string()
-    } else {
-        timer
-    };
-    let pp_timer_o = if pp_timer.is_empty() {
-        "02:00".to_string()
-    } else {
-        pp_timer
-    };
+    let team_a_o = if team_a.is_empty() { "A".to_string() } else { team_a };
+    let team_af_o = if team_af.is_empty() { "Team A".to_string() } else { team_af };
+    let team_b_o = if team_b.is_empty() { "B".to_string() } else { team_b };
+    let team_bf_o = if team_bf.is_empty() { "Team B".to_string() } else { team_bf };
+    let la_o = if la.is_empty() { "team-a.png".to_string() } else { la };
+    let lb_o = if lb.is_empty() { "team-b.png".to_string() } else { lb };
 
     let display = serde_json::json!({
         "TournamentTitle": tournament,
@@ -337,8 +259,8 @@ pub fn build_client_state(
         "TeamAFull": team_af_o,
         "TeamB": team_b_o,
         "TeamBFull": team_bf_o,
-        "penalty_a": pa_o,
-        "penalty_b": pb_o,
+        "penalty_a": pa,
+        "penalty_b": pb,
         "ScoreA": sa,
         "ScoreB": sb,
         "ShotsA": sha,
@@ -346,8 +268,8 @@ pub fn build_client_state(
         "logo_a": la_o,
         "logo_b": lb_o,
         "Timer": timer_o,
-        "PowerPlayTimer": pp_timer_o,
-        "PowerPlayActive": pp_active,
+        "PowerPlayTimer": "02:00",
+        "PowerPlayActive": false,
         "Period": period,
         "Running": running,
         "Visible": visible,
@@ -380,7 +302,6 @@ fn overlay_dist_path(app: &AppHandle) -> Result<PathBuf, String> {
 pub struct GatewaySync {
     pub source: Value,
     pub field: ActiveField,
-    pub use_new_schema: bool,
     pub name_mode: TeamNameMode,
 }
 
@@ -396,13 +317,13 @@ struct GatewayInner {
 
 async fn envelope_for_display_async(runtime: &RuntimeHandles) -> String {
     let g = runtime.sync.read().await;
-    let display = build_client_state(&g.source, g.field, g.use_new_schema, g.name_mode);
+    let display = build_client_state(&g.source, g.field, g.name_mode);
     serde_json::json!({ "type": "state", "payload": display }).to_string()
 }
 
 async fn get_state_json(State(inner): State<GatewayInner>) -> Result<Json<Value>, StatusCode> {
     let g = inner.runtime.sync.read().await;
-    let display = build_client_state(&g.source, g.field, g.use_new_schema, g.name_mode);
+    let display = build_client_state(&g.source, g.field, g.name_mode);
     Ok(Json(display))
 }
 
@@ -414,7 +335,7 @@ async fn ws_connected(mut socket: WebSocket, inner: GatewayInner) {
     let mut rx = inner.runtime.tx.subscribe();
     let initial = {
         let g = inner.runtime.sync.read().await;
-        build_client_state(&g.source, g.field, g.use_new_schema, g.name_mode)
+        build_client_state(&g.source, g.field, g.name_mode)
     };
     let envelope = serde_json::json!({ "type": "state", "payload": initial }).to_string();
     if socket.send(Message::Text(envelope.into())).await.is_err() {
@@ -477,14 +398,15 @@ async fn poll_loop(
                 match client.get(&api_url).send().await {
                     Ok(resp) if resp.status().is_success() => {
                         if let Ok(json) = resp.json::<Value>().await {
-                            let (merged, new_schema) = merge_incoming(json);
-                            {
-                                let mut w = runtime.sync.write().await;
-                                w.source = merged;
-                                w.use_new_schema = new_schema;
+                            let next = extract_patch(json);
+                            if next.is_object() {
+                                {
+                                    let mut w = runtime.sync.write().await;
+                                    w.source = next;
+                                }
+                                let msg = envelope_for_display_async(&runtime).await;
+                                let _ = runtime.tx.send(msg);
                             }
-                            let msg = envelope_for_display_async(&runtime).await;
-                            let _ = runtime.tx.send(msg);
                         }
                     }
                     _ => {}
@@ -586,9 +508,8 @@ impl GatewayController {
             .map_err(|e| format!("local_addr: {e}"))?;
 
         let sync = Arc::new(RwLock::new(GatewaySync {
-            source: new_schema_defaults(),
+            source: default_source_value(),
             field: initial_field,
-            use_new_schema: true,
             name_mode: initial_name_mode,
         }));
         let (tx, _rx) = broadcast::channel::<String>(32);

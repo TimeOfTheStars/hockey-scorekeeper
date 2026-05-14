@@ -1,8 +1,6 @@
 import type { GameState } from "../../../../packages/shared/types/gameState";
-import { defaultGameState } from "../../../../packages/shared/types/gameState";
 import {
   applyTeamNameMode,
-  isNewServerSchema,
   mapServerRowToGameState,
   type IceFieldId,
   type ServerScoreboardRow,
@@ -21,9 +19,6 @@ export function parseExternalStatePayload(
     return null;
   }
 
-  const base = isNewServerSchema(one)
-    ? mapServerRowToGameState(one as ServerScoreboardRow, field)
-    : ({ ...defaultGameState, ...(one as Partial<GameState>) } as GameState);
-
+  const base = mapServerRowToGameState(one as ServerScoreboardRow, field);
   return applyTeamNameMode(base, nameMode);
 }
