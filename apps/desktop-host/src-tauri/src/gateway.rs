@@ -335,6 +335,14 @@ pub fn build_client_state(
     apply_name_mode(display, name_mode)
 }
 
+pub fn user_logos_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    Ok(base.join("logos"))
+}
+
 fn overlay_dist_path(app: &AppHandle) -> Result<PathBuf, String> {
     let bundled = app
         .path()
@@ -426,13 +434,15 @@ async fn ws_connected(mut socket: WebSocket, inner: GatewayInner) {
     }
 }
 
-fn router(inner: GatewayInner, dist: PathBuf) -> Router {
+fn router(inner: GatewayInner, dist: PathBuf, user_logos_dir: PathBuf) -> Router {
     let index_path = dist.join("index.html");
     let static_service = ServeDir::new(&dist).not_found_service(ServeFile::new(index_path));
+    let user_logos_service = ServeDir::new(&user_logos_dir);
 
     Router::new()
         .route("/api/state", get(get_state_json))
         .route("/ws", get(ws_upgrade))
+        .nest_service("/user-logos", user_logos_service)
         .fallback_service(static_service)
         .with_state(inner)
 }
@@ -874,6 +884,10 @@ impl GatewayController {
             return Err("В obs-overlay/dist нет index.html".to_string());
         }
 
+        let user_logos_dir = user_logos_dir(app_handle)?;
+        std::fs::create_dir_all(&user_logos_dir)
+            .map_err(|e| format!("создать папку user-logos: {e}"))?;
+
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .map_err(|e| format!("порт {port} недоступен: {e}"))?;
@@ -900,7 +914,7 @@ impl GatewayController {
         let inner = GatewayInner {
             runtime: runtime.clone(),
         };
-        let axum_app = router(inner, dist);
+        let axum_app = router(inner, dist, user_logos_dir);
 
         let token = CancellationToken::new();
         let token_serve = token.clone();

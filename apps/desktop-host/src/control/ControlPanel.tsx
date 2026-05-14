@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Eye, EyeOff, Minus, Pause, Play, Plus, RotateCcw, Wifi, WifiOff } from "lucide-react";
+import { Eye, EyeOff, FolderOpen, Minus, Pause, Play, Plus, RotateCcw, Wifi, WifiOff } from "lucide-react";
 import { useEffect, useState, type ChangeEvent, type FocusEvent } from "react";
 import type { ServerField, ServerScoreboardRow } from "../../../../packages/shared/types/serverScoreboard";
 import { ObsScoreboardView } from "../../../obs-overlay/src/obs-scoreboard/ObsScoreboardView";
@@ -112,6 +112,69 @@ function NumberStepper({
   );
 }
 
+function LogoField({
+  label,
+  value,
+  onCommit,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onCommit: (next: string) => void;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useSyncedText(value);
+  const [picking, setPicking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const onBrowse = async () => {
+    if (picking) return;
+    setPicking(true);
+    setError(null);
+    try {
+      const url = await invoke<string | null>("pick_logo_file");
+      if (url) {
+        setDraft(url);
+        onCommit(url);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPicking(false);
+    }
+  };
+
+  return (
+    <div>
+      <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-zinc-400">{label}</span>
+      <div className="flex gap-2">
+        <input
+          className="min-w-0 flex-1 rounded-lg border border-zinc-700/80 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-amber-600/60 focus:ring-2 focus:ring-amber-500/25"
+          value={draft}
+          placeholder={placeholder}
+          onChange={(e: ChangeEvent<HTMLInputElement>) => setDraft(e.target.value)}
+          onBlur={(e: FocusEvent<HTMLInputElement>) => {
+            const next = e.target.value;
+            if (next !== value) onCommit(next);
+          }}
+          spellCheck={false}
+        />
+        <button
+          type="button"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700/80 bg-zinc-900/60 px-3 py-2 text-xs font-medium text-zinc-300 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => void onBrowse()}
+          disabled={picking}
+          title="Выбрать файл с диска — gateway раздаст его автоматически"
+        >
+          <FolderOpen className="h-3.5 w-3.5" aria-hidden />
+          {picking ? "..." : "Обзор"}
+        </button>
+      </div>
+      {error ? <p className="mt-1 text-[11px] text-red-400">{error}</p> : null}
+    </div>
+  );
+}
+
 function TextField({
   label,
   value,
@@ -181,7 +244,7 @@ function TeamCard({
       </div>
 
       <div className="mt-3">
-        <TextField label="Логотип (URL или имя файла)" value={t.logo} onCommit={commitLogo} placeholder="team-a.png" />
+        <LogoField label="Логотип (URL или имя файла)" value={t.logo} onCommit={commitLogo} placeholder="team-a.png" />
       </div>
 
       <div className="mt-4 flex flex-wrap items-end gap-4">
@@ -244,7 +307,7 @@ function TournamentSection({ source }: { source: ServerScoreboardRow | null }) {
       <h3 className="text-sm font-semibold text-white">Турнир</h3>
       <div className="mt-4 space-y-3">
         <TextField label="Название турнира" value={title} onCommit={(v) => commit(v, logo)} />
-        <TextField label="Логотип лиги (URL)" value={logo} onCommit={(v) => commit(title, v)} />
+        <LogoField label="Логотип лиги" value={logo} onCommit={(v) => commit(title, v)} placeholder="CC.png" />
         <button
           type="button"
           className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium transition ${

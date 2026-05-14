@@ -3,6 +3,7 @@ mod gateway;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 
 pub type GatewayHandle = Arc<Mutex<gateway::GatewayController>>;
@@ -208,6 +209,86 @@ async fn set_num_fields(
 }
 
 #[tauri::command]
+async fn pick_logo_file(
+    app: AppHandle,
+    gateway: State<'_, GatewayHandle>,
+) -> Result<Option<String>, String> {
+    let port = {
+        let g = gateway.lock().await;
+        g.bound_port
+            .ok_or_else(|| "Сервер не запущен".to_string())?
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Изображения", &["png", "jpg", "jpeg", "gif", "svg", "webp"])
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let chosen = rx.await.map_err(|e| format!("dialog: {e}"))?;
+    let Some(file_path) = chosen else {
+        return Ok(None);
+    };
+    let source_path = file_path
+        .into_path()
+        .map_err(|e| format!("file path: {e}"))?;
+
+    let logos_dir = gateway::user_logos_dir(&app)?;
+    std::fs::create_dir_all(&logos_dir).map_err(|e| format!("создать logos dir: {e}"))?;
+
+    let basename = source_path
+        .file_name()
+        .ok_or_else(|| "Не удалось определить имя файла".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    let mut target_name = basename.clone();
+    let mut target_path = logos_dir.join(&target_name);
+    if target_path.exists() {
+        let stem = source_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "logo".to_string());
+        let ext = source_path
+            .extension()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        target_name = if ext.is_empty() {
+            format!("{}-{}", stem, ts)
+        } else {
+            format!("{}-{}.{}", stem, ts, ext)
+        };
+        target_path = logos_dir.join(&target_name);
+    }
+
+    std::fs::copy(&source_path, &target_path).map_err(|e| format!("копирование: {e}"))?;
+
+    let encoded = url_encode_filename(&target_name);
+    Ok(Some(format!("http://127.0.0.1:{}/user-logos/{}", port, encoded)))
+}
+
+fn url_encode_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-' | '~' => c.to_string(),
+            _ => {
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                s.as_bytes()
+                    .iter()
+                    .map(|b| format!("%{:02X}", b))
+                    .collect::<String>()
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
 async fn open_control_window(
     app: AppHandle,
     gateway: State<'_, GatewayHandle>,
@@ -235,6 +316,7 @@ async fn open_control_window(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage::<GatewayHandle>(Arc::new(Mutex::new(gateway::GatewayController::new())))
         .invoke_handler(tauri::generate_handler![
             start_score_gateway,
@@ -255,6 +337,7 @@ pub fn run() {
             reset_timer,
             set_num_fields,
             open_control_window,
+            pick_logo_file,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
